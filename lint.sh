@@ -11,6 +11,6 @@ valgrind \
         --track-origins=yes \
         --track-fds=yes \
         --error-exitcode=1 \
-        ./zig-out/bin/video-editor --input ./res/sample.png --lint
+        ./zig-out/bin/video-editor --input ./res/test.mp4 --lint
 
 echo "Success"
