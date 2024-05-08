@@ -1,247 +1,7 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavutil/samplefmt.h");
-    @cInclude("libavutil/imgutils.h");
-    @cInclude("glad/glad.h");
-    @cInclude("GLFW/glfw3.h");
-});
-
-fn errorCallback(err: c_int, description: [*c]const u8) callconv(.C) void {
-    std.log.err("glfw error {d}: {s}", .{ err, description });
-}
-
-fn glDebugCallback(source: c.GLenum, typ: c.GLenum, id: c.GLuint, severity: c.GLenum, length: c.GLsizei, message: [*c]const c.GLchar, user_param: ?*const anyopaque) callconv(.C) void {
-    _ = source;
-    _ = id;
-    _ = severity;
-    _ = length;
-    _ = user_param;
-
-    if (typ != c.GL_DEBUG_TYPE_ERROR) {
-        return;
-    }
-    std.log.err("{s}", .{message});
-}
-
-const VideoFrame = struct {
-    width: usize,
-    height: usize,
-    stride: usize,
-    pts: f32,
-    y: []const u8,
-    u: []const u8,
-    v: []const u8,
-};
-
-const VideoDecoderError = error{
-    Unimplemented,
-    InvalidData,
-    OutOfMemory,
-    InternalError,
-};
-
-const VideoDecoder = struct {
-    const stream_idx: usize = 0;
-
-    fmt_ctx: *c.AVFormatContext,
-    decoder_ctx: *c.AVCodecContext,
-    frame: *c.AVFrame,
-    packet: *c.AVPacket,
-
-    fn makeFormatCtx(path: [:0]const u8) VideoDecoderError!*c.AVFormatContext {
-        var fmt_ctx_opt: ?*c.AVFormatContext = null;
-        if (c.avformat_open_input(&fmt_ctx_opt, path, null, null) < 0) {
-            std.log.err("Failed to open video", .{});
-            return VideoDecoderError.InvalidData;
-        }
-
-        return fmt_ctx_opt.?;
-    }
-
-    fn makeDecoderCtx(fmt_ctx: *c.AVFormatContext) VideoDecoderError!*c.AVCodecContext {
-        if (c.avformat_find_stream_info(fmt_ctx, null) < 0) {
-            std.log.err("Failed to find stream info", .{});
-            return VideoDecoderError.InternalError;
-        }
-
-        if (fmt_ctx.nb_streams < 1) {
-            std.log.err("Input has no streams", .{});
-            return VideoDecoderError.Unimplemented;
-        }
-
-        const stream = fmt_ctx.streams[stream_idx].*;
-        if (stream.codecpar.*.codec_type != c.AVMEDIA_TYPE_VIDEO) {
-            std.log.err("First stream is not video", .{});
-            return VideoDecoderError.Unimplemented;
-        }
-
-        const codec_id = stream.codecpar.*.codec_id;
-        const codec = c.avcodec_find_decoder(codec_id);
-
-        var decoder_ctx = c.avcodec_alloc_context3(codec) orelse {
-            std.log.err("Failed to create decoder", .{});
-            return VideoDecoderError.InternalError;
-        };
-        errdefer c.avcodec_free_context(&decoder_ctx);
-
-        if (c.avcodec_parameters_to_context(decoder_ctx, stream.codecpar) < 0) {
-            std.log.err("Failed to copy codec parameters", .{});
-            return VideoDecoderError.InternalError;
-        }
-
-        if (c.avcodec_open2(decoder_ctx, codec, null) < 0) {
-            std.log.err("Failed to open codec", .{});
-            return VideoDecoderError.InternalError;
-        }
-
-        return decoder_ctx;
-    }
-
-    fn makeFrame() VideoDecoderError!*c.AVFrame {
-        return c.av_frame_alloc() orelse {
-            std.log.err("Failed to alloc frame", .{});
-            return VideoDecoderError.OutOfMemory;
-        };
-    }
-
-    fn makePacket() VideoDecoderError!*c.AVPacket {
-        return c.av_packet_alloc() orelse {
-            std.log.err("Failed to alloc packet", .{});
-            return VideoDecoderError.OutOfMemory;
-        };
-    }
-
-    // Color conversion depends on the color space
-    // Color space may be unspecified
-    // If unspecified, we use heuristics to determine what the best fit
-    // would be
-    fn resolveColorspaceYuv(colorspace: c.AVColorSpace, height: usize) c.AVColorSpace {
-        // Looking at ffplay -> SDL code, it seems that in this case ffplay
-        // decides to use SDL's automatic YUV mode, which essentially follows
-        // this logic
-        const yuv_sd_threshold = 576;
-        if (colorspace != c.AVCOL_SPC_UNSPECIFIED) {
-            return colorspace;
-        }
-
-        if (height <= yuv_sd_threshold) {
-            return c.AVCOL_SPC_BT470BG;
-        } else {
-            return c.AVCOL_SPC_BT709;
-        }
-    }
-
-    pub fn init(path: [:0]const u8) VideoDecoderError!VideoDecoder {
-        const fmt_ctx = try makeFormatCtx(path);
-        errdefer c.avformat_free_context(fmt_ctx);
-
-        var decoder_ctx = try makeDecoderCtx(fmt_ctx);
-        errdefer c.avcodec_free_context(@ptrCast(&decoder_ctx));
-
-        var frame = try makeFrame();
-        errdefer c.av_frame_free(@ptrCast(&frame));
-
-        var pkt = try makePacket();
-        errdefer c.av_packet_free(@ptrCast(&pkt));
-
-        return .{
-            .fmt_ctx = fmt_ctx,
-            .decoder_ctx = decoder_ctx,
-            .frame = frame,
-            .packet = pkt,
-        };
-    }
-
-    pub fn deinit(self: *VideoDecoder) void {
-        c.av_packet_free(@ptrCast(&self.packet));
-        c.av_frame_free(@ptrCast(&self.frame));
-        c.avcodec_free_context(@ptrCast(&self.decoder_ctx));
-        c.avformat_close_input(@ptrCast(&self.fmt_ctx));
-        c.avformat_free_context(self.fmt_ctx);
-    }
-
-    pub fn next(self: *VideoDecoder) VideoDecoderError!VideoFrame {
-        c.av_frame_unref(self.frame);
-        while (true) {
-            c.av_packet_unref(self.packet);
-            if (c.av_read_frame(self.fmt_ctx, self.packet) < 0) {
-                std.log.err("failed to read frame", .{});
-                return error.InvalidData;
-            }
-
-            if (self.packet.stream_index != stream_idx) {
-                continue;
-            }
-
-            if (c.avcodec_send_packet(self.decoder_ctx, self.packet) < 0) {
-                std.log.err("failed to send packet to decoder", .{});
-                return VideoDecoderError.InvalidData;
-            }
-
-            if (c.avcodec_receive_frame(self.decoder_ctx, self.frame) < 0) {
-                std.log.err("failed to turn packet into frame", .{});
-                return VideoDecoderError.InvalidData;
-            }
-
-            if (self.frame.format != c.AV_PIX_FMT_YUV420P) {
-                // Major assumption made in OpenGL conversion about data format
-                std.log.err("Unsupported frame format: {s}", .{c.av_get_pix_fmt_name(self.frame.format)});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            const width: usize = @intCast(self.frame.width);
-            const height: usize = @intCast(self.frame.height);
-            const stride: usize = @intCast(self.frame.linesize[0]);
-
-            const colorspace = resolveColorspaceYuv(self.frame.colorspace, height);
-
-            if (colorspace != c.AVCOL_SPC_BT470BG) {
-                // Major assumption made in OpenGL conversion about data format
-                std.log.err("Unsupported colorspace: {d}", .{self.frame.colorspace});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            if (self.frame.linesize[1] != @divTrunc(self.frame.linesize[0], 2) or self.frame.linesize[2] != @divTrunc(self.frame.linesize[0], 2)) {
-                std.log.err("Assumption that UV channel stride is half Y stride is not true", .{});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            const y = self.frame.data[0][0 .. stride * height];
-            const u = self.frame.data[1][0 .. y.len / 4];
-            const v = self.frame.data[2][0 .. y.len / 4];
-
-            var pts: f32 = @floatFromInt(self.frame.pts);
-            const time_base = self.fmt_ctx.streams[stream_idx].*.time_base;
-            pts *= @floatFromInt(time_base.num);
-            pts /= @floatFromInt(time_base.den);
-
-            return .{
-                .stride = @intCast(stride),
-                .width = width,
-                .height = height,
-                .y = y,
-                .u = u,
-                .v = v,
-                .pts = pts,
-            };
-        }
-    }
-};
-
-fn makeTexture() c.GLuint {
-    var texture: c.GLuint = undefined;
-    c.glGenTextures(1, &texture);
-    c.glBindTexture(c.GL_TEXTURE_2D, texture);
-    // set the texture wrapping/filtering options (on the currently bound texture object)
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-
-    return texture;
-}
+const c = @import("c.zig");
+const Gui = @import("Gui.zig");
+const decoder = @import("decoder.zig");
 
 const ArgParseError = std.process.ArgIterator.InitError;
 
@@ -344,132 +104,23 @@ pub fn main() !void {
     var args = try Args.init(alloc);
     defer args.deinit();
 
-    if (c.glfwInit() == c.GLFW_FALSE) {
-        std.log.err("failed to init glfw", .{});
-        return error.Initialization;
-    }
-
-    defer c.glfwTerminate();
-
-    _ = c.glfwSetErrorCallback(errorCallback);
-
-    const window = c.glfwCreateWindow(640, 480, "My Title", null, null) orelse {
-        std.log.err("failed to create glfw window", .{});
-        return error.Initialization;
-    };
-
-    defer c.glfwDestroyWindow(window);
-
-    c.glfwMakeContextCurrent(window);
-    if (c.gladLoadGL() == 0) {
-        std.log.err("failed to init glad", .{});
-        return error.Initialization;
-    }
-
-    c.glfwSwapInterval(1);
-
-    c.glEnable(c.GL_DEBUG_OUTPUT);
-    c.glDebugMessageCallback(glDebugCallback, null);
-
-    const vert_shader_source: [*c]const u8 =
-        \\#version 330 core
-        \\
-        \\out vec2 vert_coord_2d;
-        \\void main()
-        \\{
-        \\  const vec4 vertices[4] = vec4[](
-        \\    vec4(-1.0, -1.0, 0.0, 1.0),
-        \\    vec4(1.0, -1.0, 0.0, 1.0),
-        \\    vec4(-1.0, 1.0, 0.0, 1.0),
-        \\    vec4(1.0, 1.0, 0.0, 1.0)
-        \\  );
-        \\  vert_coord_2d = vec2(vertices[gl_VertexID].x, vertices[gl_VertexID].y);
-        \\  gl_Position = vertices[gl_VertexID];
-        \\}
-    ;
-
-    const vertex_shader = c.glCreateShader(c.GL_VERTEX_SHADER);
-    defer c.glDeleteShader(vertex_shader);
-    c.glShaderSource(vertex_shader, 1, &vert_shader_source, null);
-    c.glCompileShader(vertex_shader);
-
-    const frag_shader_source: [*c]const u8 =
-        \\#version 330
-        \\in vec2 vert_coord_2d;
-        \\out vec4 fragment;
-        \\uniform sampler2D y_tex;
-        \\uniform sampler2D u_tex;
-        \\uniform sampler2D v_tex;
-        \\void main()
-        \\{
-        \\    vec2 frag_coord = (vert_coord_2d + 1.0) / 2.0;
-        \\    frag_coord.y *= -1;
-        \\
-        \\    float y = texture(y_tex, frag_coord).r;
-        \\    float u = texture(u_tex, frag_coord).r;
-        \\    float v = texture(v_tex, frag_coord).r;
-        \\
-        \\    // https://en.wikipedia.org/wiki/YCbCr#ITU-R_BT.601_conversion
-        \\    y -= 16.0 / 255.0;
-        \\    v -= 0.5;
-        \\    u -= 0.5;
-        \\    y *= 255.0 / 219.0;
-        \\    u *= 255.0 / 224.0 * 1.772;
-        \\    v *= 255.0 / 224.0 * 1.402;
-        \\    float r = y + v;
-        \\    float g = y - u * 0.114 / 0.587 - v * 0.299 / 0.587;
-        \\    float b = y + u;
-        \\    fragment = vec4(r, g, b, 1.0);
-        \\}
-    ;
-
-    const fragment_shader = c.glCreateShader(c.GL_FRAGMENT_SHADER);
-    defer c.glDeleteShader(fragment_shader);
-    c.glShaderSource(fragment_shader, 1, &frag_shader_source, null);
-    c.glCompileShader(fragment_shader);
-
-    const program = c.glCreateProgram();
-    defer c.glDeleteProgram(program);
-    c.glAttachShader(program, vertex_shader);
-    c.glAttachShader(program, fragment_shader);
-    c.glLinkProgram(program);
-
-    c.glClearColor(0.0, 0.0, 1.0, 1.0);
-
-    var decoder = try VideoDecoder.init(args.input);
-    defer decoder.deinit();
-
-    const y_texture = makeTexture();
-    defer c.glDeleteTextures(1, &y_texture);
-
-    const u_texture = makeTexture();
-    defer c.glDeleteTextures(1, &u_texture);
-
-    const v_texture = makeTexture();
-    defer c.glDeleteTextures(1, &v_texture);
+    var gui = try Gui.init();
+    defer gui.deinit();
+    var dec = try decoder.VideoDecoder.init(args.input);
+    defer dec.deinit();
 
     const start_time = try std.time.Instant.now();
-    var img = try decoder.next();
+    var img = try dec.next();
 
     var i: usize = 0;
-    while (c.glfwWindowShouldClose(window) == 0) {
+    while (!gui.shouldClose()) {
         defer i += 1;
-        var width: c_int = undefined;
-        var height: c_int = undefined;
-
         const now = try std.time.Instant.now();
 
         while (img.pts * 1e9 < @as(f32, @floatFromInt(now.since(start_time)))) {
-            c.glBindTexture(c.GL_TEXTURE_2D, y_texture);
-            c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RED, @intCast(img.stride), @intCast(img.height), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, img.y.ptr);
+            gui.swapFrame(img);
 
-            c.glBindTexture(c.GL_TEXTURE_2D, u_texture);
-            c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RED, @intCast(@divTrunc(img.stride, 2)), @intCast(@divTrunc(img.height, 2)), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, img.u.ptr);
-
-            c.glBindTexture(c.GL_TEXTURE_2D, v_texture);
-            c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RED, @intCast(@divTrunc(img.stride, 2)), @intCast(@divTrunc(img.height, 2)), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, img.v.ptr);
-
-            img = try decoder.next();
+            img = try dec.next();
 
             // When in valgrind this loop will run forever immediately because we cannot keep up
             if (args.lint) {
@@ -477,32 +128,10 @@ pub fn main() !void {
             }
         }
 
-        c.glfwGetFramebufferSize(window, &width, &height);
-        c.glViewport(0, 0, width, height);
-
-        c.glClear(c.GL_COLOR_BUFFER_BIT);
-
-        c.glUseProgram(program);
-
-        c.glActiveTexture(c.GL_TEXTURE0);
-        c.glBindTexture(c.GL_TEXTURE_2D, y_texture);
-
-        c.glActiveTexture(c.GL_TEXTURE1);
-        c.glBindTexture(c.GL_TEXTURE_2D, u_texture);
-
-        c.glActiveTexture(c.GL_TEXTURE2);
-        c.glBindTexture(c.GL_TEXTURE_2D, v_texture);
-
-        c.glUniform1i(c.glGetUniformLocation(program, "y_tex"), 0);
-        c.glUniform1i(c.glGetUniformLocation(program, "u_tex"), 1);
-        c.glUniform1i(c.glGetUniformLocation(program, "v_tex"), 2);
-
-        c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
-
-        c.glfwSwapBuffers(window);
+        gui.render();
 
         if (args.lint and i > 20) {
-            c.glfwSetWindowShouldClose(window, 1);
+            gui.setClose();
         }
     }
 }
