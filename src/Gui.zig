@@ -6,6 +6,8 @@ const VideoFrame = decoder.VideoFrame;
 y_texture: c.GLuint,
 u_texture: c.GLuint,
 v_texture: c.GLuint,
+width_ratio: f32,
+image_aspect_ratio: f32,
 program: c.GLuint,
 window: *c.GLFWwindow,
 
@@ -77,6 +79,8 @@ pub fn init() Error!Self {
         .y_texture = y_texture,
         .u_texture = u_texture,
         .v_texture = v_texture,
+        .width_ratio = 1.0,
+        .image_aspect_ratio = 1.0,
         .program = program,
         .window = window,
     };
@@ -100,6 +104,12 @@ pub fn swapFrame(self: *Self, frame: VideoFrame) void {
 
     c.glBindTexture(c.GL_TEXTURE_2D, self.v_texture);
     c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RED, @intCast(@divTrunc(frame.stride, 2)), @intCast(@divTrunc(frame.height, 2)), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, frame.v.ptr);
+
+    self.width_ratio = @floatFromInt(frame.width);
+    self.width_ratio /= @floatFromInt(frame.stride);
+
+    self.image_aspect_ratio = @floatFromInt(frame.width);
+    self.image_aspect_ratio /= @floatFromInt(frame.height);
 }
 
 pub fn shouldClose(self: *const Self) bool {
@@ -115,6 +125,11 @@ pub fn render(self: *Self) void {
     var height: c_int = undefined;
 
     c.glfwGetFramebufferSize(self.window, &width, &height);
+    var window_aspect_ratio: f32 = @floatFromInt(width);
+    window_aspect_ratio /= @floatFromInt(height);
+
+    const aspect_ratio_ratio = window_aspect_ratio / self.image_aspect_ratio;
+
     c.glViewport(0, 0, width, height);
 
     c.glClear(c.GL_COLOR_BUFFER_BIT);
@@ -133,6 +148,8 @@ pub fn render(self: *Self) void {
     c.glUniform1i(c.glGetUniformLocation(self.program, "y_tex"), 0);
     c.glUniform1i(c.glGetUniformLocation(self.program, "u_tex"), 1);
     c.glUniform1i(c.glGetUniformLocation(self.program, "v_tex"), 2);
+    c.glUniform1f(c.glGetUniformLocation(self.program, "width_ratio"), self.width_ratio);
+    c.glUniform1f(c.glGetUniformLocation(self.program, "aspect_ratio_ratio"), aspect_ratio_ratio);
 
     c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
 
