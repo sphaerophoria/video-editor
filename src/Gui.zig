@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig");
 const decoder = @import("decoder.zig");
+const Allocator = std.mem.Allocator;
 const VideoFrame = decoder.VideoFrame;
 
 y_texture: c.GLuint,
@@ -118,6 +119,31 @@ pub fn shouldClose(self: *const Self) bool {
 
 pub fn setClose(self: *Self) void {
     c.glfwSetWindowShouldClose(self.window, 1);
+}
+
+pub const Action = enum(u8) {
+    toggle_pause,
+};
+
+pub fn getActions(self: *Self, alloc: Allocator) std.ArrayList(Action) {
+    var ret = std.ArrayList(Action).init(alloc);
+
+    const keyCallback = struct {
+        fn f(window: ?*c.GLFWwindow, key: c_int, _: c_int, action: c_int, _: c_int) callconv(.C) void {
+            const userdata = c.glfwGetWindowUserPointer(window);
+            const actions: *std.ArrayList(Action) = @ptrCast(@alignCast(userdata));
+            if (key == c.GLFW_KEY_SPACE and action == c.GLFW_PRESS) {
+                actions.append(.toggle_pause) catch {
+                    std.log.err("failed to handle input action", .{});
+                };
+            }
+        }
+    }.f;
+
+    c.glfwSetWindowUserPointer(self.window, &ret);
+    _ = c.glfwSetKeyCallback(self.window, keyCallback);
+    c.glfwPollEvents();
+    return ret;
 }
 
 pub fn render(self: *Self) void {

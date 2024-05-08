@@ -3,6 +3,54 @@ const c = @import("c.zig");
 const Gui = @import("Gui.zig");
 const decoder = @import("decoder.zig");
 
+const PlayerState = struct {
+    start_time: std.time.Instant,
+    pause_time: ?std.time.Instant,
+    time_adjustment: u64,
+
+    fn init(now: std.time.Instant) PlayerState {
+        return .{
+            .start_time = now,
+            .pause_time = null,
+            .time_adjustment = 0,
+        };
+    }
+
+    fn pause(self: *PlayerState, now: std.time.Instant) void {
+        // Do not overwrite existing pause start
+        if (self.isPaused()) {
+            return;
+        }
+        self.pause_time = now;
+    }
+
+    fn play(self: *PlayerState, now: std.time.Instant) void {
+        // Avoid invalid access to pause_time below
+        if (self.pause_time == null) {
+            return;
+        }
+
+        self.time_adjustment += now.since(self.pause_time.?);
+        self.pause_time = null;
+    }
+
+    fn isPaused(self: *const PlayerState) bool {
+        return self.pause_time != null;
+    }
+
+    fn togglePause(self: *PlayerState, now: std.time.Instant) void {
+        if (self.isPaused()) {
+            self.play(now);
+        } else {
+            self.pause(now);
+        }
+    }
+
+    fn shouldUpdateFrame(self: *const PlayerState, now: std.time.Instant, frame_pts: f32) bool {
+        return self.pause_time == null and frame_pts * 1e9 < @as(f32, @floatFromInt(now.since(self.start_time) - self.time_adjustment));
+    }
+};
+
 const ArgParseError = std.process.ArgIterator.InitError;
 
 const Args = struct {
@@ -106,23 +154,33 @@ pub fn main() !void {
 
     var gui = try Gui.init();
     defer gui.deinit();
+
     var dec = try decoder.VideoDecoder.init(args.input);
     defer dec.deinit();
 
-    const start_time = try std.time.Instant.now();
     var img = try dec.next();
+
+    var player_state = PlayerState.init(try std.time.Instant.now());
 
     var i: usize = 0;
     while (!gui.shouldClose()) {
         defer i += 1;
         const now = try std.time.Instant.now();
 
-        while (img.pts * 1e9 < @as(f32, @floatFromInt(now.since(start_time)))) {
+        var actions = gui.getActions(alloc);
+        defer actions.deinit();
+
+        for (actions.items) |action| {
+            switch (action) {
+                .toggle_pause => {
+                    player_state.togglePause(now);
+                },
+            }
+        }
+
+        while (player_state.shouldUpdateFrame(now, img.pts)) {
             gui.swapFrame(img);
-
             img = try dec.next();
-
-            // When in valgrind this loop will run forever immediately because we cannot keep up
             if (args.lint) {
                 break;
             }
