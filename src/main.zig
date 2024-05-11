@@ -143,6 +143,24 @@ const Args = struct {
     }
 };
 
+fn getNextVideoFrame(dec: *decoder.VideoDecoder) !decoder.VideoFrame {
+    while (true) {
+        var frame = try dec.next();
+        if (frame == null) {
+            continue;
+        }
+
+        switch (frame.?) {
+            .audio => |*af| {
+                af.deinit();
+            },
+            .video => |vf| {
+                return vf;
+            },
+        }
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -155,10 +173,11 @@ pub fn main() !void {
     var gui = try Gui.init();
     defer gui.deinit();
 
-    var dec = try decoder.VideoDecoder.init(args.input);
+    var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
 
-    var img = try dec.next();
+    var img: decoder.VideoFrame = try getNextVideoFrame(&dec);
+    defer img.deinit();
 
     var player_state = PlayerState.init(try std.time.Instant.now());
 
@@ -180,7 +199,17 @@ pub fn main() !void {
 
         while (player_state.shouldUpdateFrame(now, img.pts)) {
             gui.swapFrame(img);
-            img = try dec.next();
+
+            var new_img = try getNextVideoFrame(&dec);
+            if (img.stream_id != new_img.stream_id) {
+                std.log.warn("Ignoring frame from new video stream", .{});
+                new_img.deinit();
+                continue;
+            }
+
+            img.deinit();
+            img = new_img;
+
             if (args.lint) {
                 break;
             }

@@ -1,7 +1,63 @@
 const std = @import("std");
 const c = @import("c.zig");
+const Allocator = std.mem.Allocator;
+
+pub const FramePool = struct {
+    // Frames may be released from other threads
+    mutex: std.Thread.Mutex,
+    // All allocated AVFrames. Some may be in use
+    pool: std.ArrayList(*c.AVFrame),
+    // Frames ready to be reused
+    free_ids: std.ArrayList(usize),
+
+    pub fn init(alloc: Allocator) FramePool {
+        return .{
+            .mutex = std.Thread.Mutex{},
+            .pool = std.ArrayList(*c.AVFrame).init(alloc),
+            .free_ids = std.ArrayList(usize).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *FramePool) void {
+        // No mutex lock, if someone is still using us we shouldn't be trying
+        // to destruct
+        for (self.pool.items) |*item| {
+            c.av_frame_free(@ptrCast(item));
+        }
+
+        self.pool.deinit();
+        self.free_ids.deinit();
+    }
+
+    pub fn acquire(self: *FramePool) VideoDecoderError!usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.free_ids.items.len == 0) {
+            try self.pool.append(try makeFrame());
+            self.free_ids.append(self.pool.items.len - 1) catch |e| {
+                var f = self.pool.pop();
+                c.av_frame_free(@ptrCast(&f));
+
+                return e;
+            };
+        }
+        return self.free_ids.pop();
+    }
+
+    pub fn release(self: *FramePool, id: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        c.av_frame_unref(self.pool.items[id]);
+        self.free_ids.append(id) catch {
+            _ = self.pool.swapRemove(id);
+        };
+    }
+};
 
 pub const VideoFrame = struct {
+    stream_id: usize,
     width: usize,
     height: usize,
     stride: usize,
@@ -9,9 +65,44 @@ pub const VideoFrame = struct {
     y: []const u8,
     u: []const u8,
     v: []const u8,
+    frame_pool: *FramePool,
+    frame_id: usize,
+
+    pub fn deinit(self: *VideoFrame) void {
+        self.frame_pool.release(self.frame_id);
+    }
+};
+
+pub const AudioFormat = enum {
+    f32,
+};
+
+pub const AudioFrame = struct {
+    stream_id: usize,
+    channel_data: std.ArrayList([]const u8),
+    frame_pool: *FramePool,
+    frame_id: usize,
+
+    pub fn deinit(self: *AudioFrame) void {
+        self.frame_pool.release(self.frame_id);
+        self.channel_data.deinit();
+    }
+};
+
+pub const Frame = union(enum) {
+    audio: AudioFrame,
+    video: VideoFrame,
+
+    pub fn deinit(self: *Frame) void {
+        switch (self.*) {
+            .audio => |*af| af.deinit(),
+            .video => |*vf| vf.deinit(),
+        }
+    }
 };
 
 const VideoDecoderError = error{
+    Again,
     Unimplemented,
     InvalidData,
     OutOfMemory,
@@ -19,12 +110,19 @@ const VideoDecoderError = error{
 };
 
 pub const VideoDecoder = struct {
-    const stream_idx: usize = 0;
-
+    alloc: Allocator,
     fmt_ctx: *c.AVFormatContext,
-    decoder_ctx: *c.AVCodecContext,
-    frame: *c.AVFrame,
+    decoder_ctxs: std.ArrayList(*c.AVCodecContext),
+    frame_pool: FramePool,
     packet: *c.AVPacket,
+
+    fn freeDecoderContexts(ctxs: *std.ArrayList(*c.AVCodecContext)) void {
+        for (ctxs.items) |*ctx| {
+            c.avcodec_free_context(@ptrCast(ctx));
+        }
+
+        ctxs.deinit();
+    }
 
     fn makeFormatCtx(path: [:0]const u8) VideoDecoderError!*c.AVFormatContext {
         var fmt_ctx_opt: ?*c.AVFormatContext = null;
@@ -36,50 +134,41 @@ pub const VideoDecoder = struct {
         return fmt_ctx_opt.?;
     }
 
-    fn makeDecoderCtx(fmt_ctx: *c.AVFormatContext) VideoDecoderError!*c.AVCodecContext {
+    fn makeDecoderCtxs(alloc: Allocator, fmt_ctx: *c.AVFormatContext) VideoDecoderError!std.ArrayList(*c.AVCodecContext) {
         if (c.avformat_find_stream_info(fmt_ctx, null) < 0) {
             std.log.err("Failed to find stream info", .{});
             return VideoDecoderError.InternalError;
         }
 
-        if (fmt_ctx.nb_streams < 1) {
-            std.log.err("Input has no streams", .{});
-            return VideoDecoderError.Unimplemented;
+        var ret = std.ArrayList(*c.AVCodecContext).init(alloc);
+        errdefer freeDecoderContexts(&ret);
+
+        for (0..fmt_ctx.nb_streams) |i| {
+            const stream = fmt_ctx.streams[i].*;
+
+            const codec_id = stream.codecpar.*.codec_id;
+            const codec = c.avcodec_find_decoder(codec_id);
+
+            var decoder_ctx = c.avcodec_alloc_context3(codec) orelse {
+                std.log.err("Failed to create decoder", .{});
+                return VideoDecoderError.InternalError;
+            };
+            errdefer c.avcodec_free_context(&decoder_ctx);
+
+            if (c.avcodec_parameters_to_context(decoder_ctx, stream.codecpar) < 0) {
+                std.log.err("Failed to copy codec parameters", .{});
+                return VideoDecoderError.InternalError;
+            }
+
+            if (c.avcodec_open2(decoder_ctx, codec, null) < 0) {
+                std.log.err("Failed to open codec", .{});
+                return VideoDecoderError.InternalError;
+            }
+
+            try ret.append(decoder_ctx);
         }
 
-        const stream = fmt_ctx.streams[stream_idx].*;
-        if (stream.codecpar.*.codec_type != c.AVMEDIA_TYPE_VIDEO) {
-            std.log.err("First stream is not video", .{});
-            return VideoDecoderError.Unimplemented;
-        }
-
-        const codec_id = stream.codecpar.*.codec_id;
-        const codec = c.avcodec_find_decoder(codec_id);
-
-        var decoder_ctx = c.avcodec_alloc_context3(codec) orelse {
-            std.log.err("Failed to create decoder", .{});
-            return VideoDecoderError.InternalError;
-        };
-        errdefer c.avcodec_free_context(&decoder_ctx);
-
-        if (c.avcodec_parameters_to_context(decoder_ctx, stream.codecpar) < 0) {
-            std.log.err("Failed to copy codec parameters", .{});
-            return VideoDecoderError.InternalError;
-        }
-
-        if (c.avcodec_open2(decoder_ctx, codec, null) < 0) {
-            std.log.err("Failed to open codec", .{});
-            return VideoDecoderError.InternalError;
-        }
-
-        return decoder_ctx;
-    }
-
-    fn makeFrame() VideoDecoderError!*c.AVFrame {
-        return c.av_frame_alloc() orelse {
-            std.log.err("Failed to alloc frame", .{});
-            return VideoDecoderError.OutOfMemory;
-        };
+        return ret;
     }
 
     fn makePacket() VideoDecoderError!*c.AVPacket {
@@ -109,99 +198,191 @@ pub const VideoDecoder = struct {
         }
     }
 
-    pub fn init(path: [:0]const u8) VideoDecoderError!VideoDecoder {
+    pub fn init(alloc: Allocator, path: [:0]const u8) VideoDecoderError!VideoDecoder {
         const fmt_ctx = try makeFormatCtx(path);
         errdefer c.avformat_free_context(fmt_ctx);
 
-        var decoder_ctx = try makeDecoderCtx(fmt_ctx);
-        errdefer c.avcodec_free_context(@ptrCast(&decoder_ctx));
+        var decoder_ctxs = try makeDecoderCtxs(alloc, fmt_ctx);
+        errdefer freeDecoderContexts(&decoder_ctxs);
 
-        var frame = try makeFrame();
-        errdefer c.av_frame_free(@ptrCast(&frame));
+        var frame_pool = FramePool.init(alloc);
+        errdefer frame_pool.deinit();
 
         var pkt = try makePacket();
         errdefer c.av_packet_free(@ptrCast(&pkt));
 
         return .{
+            .alloc = alloc,
             .fmt_ctx = fmt_ctx,
-            .decoder_ctx = decoder_ctx,
-            .frame = frame,
+            .decoder_ctxs = decoder_ctxs,
+            .frame_pool = frame_pool,
             .packet = pkt,
         };
     }
 
     pub fn deinit(self: *VideoDecoder) void {
         c.av_packet_free(@ptrCast(&self.packet));
-        c.av_frame_free(@ptrCast(&self.frame));
-        c.avcodec_free_context(@ptrCast(&self.decoder_ctx));
+        self.frame_pool.deinit();
+        freeDecoderContexts(&self.decoder_ctxs);
         c.avformat_close_input(@ptrCast(&self.fmt_ctx));
         c.avformat_free_context(self.fmt_ctx);
     }
 
-    pub fn next(self: *VideoDecoder) VideoDecoderError!VideoFrame {
-        c.av_frame_unref(self.frame);
+    pub fn handleVideoFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!Frame {
+        const frame = self.frame_pool.pool.items[frame_id];
+        if (frame.format != c.AV_PIX_FMT_YUV420P) {
+            // Major assumption made in OpenGL conversion about data format
+            std.log.err("Unsupported frame format: {s}", .{c.av_get_pix_fmt_name(frame.format)});
+            return VideoDecoderError.Unimplemented;
+        }
+
+        const width = try cIntToUsize(frame.width, "frame width");
+        const height = try cIntToUsize(frame.height, "frame height");
+        const stride = try cIntToUsize(frame.linesize[0], "frame stride");
+
+        const colorspace = resolveColorspaceYuv(frame.colorspace, height);
+
+        if (colorspace != c.AVCOL_SPC_BT470BG) {
+            // Major assumption made in OpenGL conversion about data format
+            std.log.err("Unsupported colorspace: {d}", .{frame.colorspace});
+            return VideoDecoderError.Unimplemented;
+        }
+
+        if (frame.linesize[1] != @divTrunc(frame.linesize[0], 2) or frame.linesize[2] != @divTrunc(frame.linesize[0], 2)) {
+            std.log.err("Assumption that UV channel stride is half Y stride is not true", .{});
+            return VideoDecoderError.Unimplemented;
+        }
+
+        const y = frame.data[0][0 .. stride * height];
+        const u = frame.data[1][0 .. y.len / 4];
+        const v = frame.data[2][0 .. y.len / 4];
+
+        var pts: f32 = @floatFromInt(frame.pts);
+        const time_base = self.fmt_ctx.streams[@intCast(self.packet.stream_index)].*.time_base;
+        pts *= @floatFromInt(time_base.num);
+        pts /= @floatFromInt(time_base.den);
+
+        return .{ .video = .{
+            .stream_id = @intCast(self.packet.stream_index),
+            .stride = stride,
+            .width = width,
+            .height = height,
+            .y = y,
+            .u = u,
+            .v = v,
+            .pts = pts,
+            .frame_pool = &self.frame_pool,
+            .frame_id = frame_id,
+        } };
+    }
+
+    pub fn handleAudioFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!?Frame {
+        const frame = self.frame_pool.pool.items[frame_id];
+        var channel_data = std.ArrayList([]const u8).init(self.alloc);
+        errdefer channel_data.deinit();
+
+        const nb_channels = try cIntToUsize(frame.ch_layout.nb_channels, "frame channels");
+        const data_len = try cIntToUsize(frame.linesize[0], "audio data length");
+
+        for (0..nb_channels) |c_num| {
+            const data_ptr = frame.extended_data[c_num];
+            try channel_data.append(data_ptr[0..data_len]);
+        }
+
+        std.debug.assert(self.packet.stream_index >= 0); // Should have been checked in parent function
+
+        return .{ .audio = .{
+            .stream_id = @intCast(self.packet.stream_index),
+            .channel_data = channel_data,
+            .frame_pool = &self.frame_pool,
+            .frame_id = frame_id,
+        } };
+    }
+
+    const NextFrame = struct {
+        frame_id: usize,
+        stream_id: usize,
+    };
+
+    fn readNextFrame(self: *VideoDecoder) VideoDecoderError!NextFrame {
+        c.av_packet_unref(self.packet);
+        if (c.av_read_frame(self.fmt_ctx, self.packet) < 0) {
+            std.log.err("failed to read frame", .{});
+            return error.InvalidData;
+        }
+
+        if (self.packet.stream_index >= self.decoder_ctxs.items.len or self.packet.stream_index < 0) {
+            std.log.err("got frame for stream that does not exist", .{});
+            return VideoDecoderError.InvalidData;
+        }
+
+        const stream_index: usize = @intCast(self.packet.stream_index);
+        const decoder_ctx = self.decoder_ctxs.items[stream_index];
+
+        if (c.avcodec_send_packet(decoder_ctx, self.packet) < 0) {
+            std.log.err("failed to send packet to decoder", .{});
+            return VideoDecoderError.InvalidData;
+        }
+
+        const frame_id = try self.frame_pool.acquire();
+        errdefer self.frame_pool.release(frame_id);
+        const frame = self.frame_pool.pool.items[frame_id];
+
+        const ret = c.avcodec_receive_frame(decoder_ctx, frame);
+        if (ret == c.AVERROR(c.EAGAIN)) {
+            // This simplifies the error handling path, even though we could
+            // just directly try again
+            return VideoDecoderError.Again;
+        } else if (ret < 0) {
+            std.log.err("failed to turn packet into frame: {d}", .{ret});
+            return VideoDecoderError.InvalidData;
+        }
+
+        return .{
+            .frame_id = frame_id,
+            .stream_id = stream_index,
+        };
+    }
+
+    pub fn next(self: *VideoDecoder) VideoDecoderError!?Frame {
         while (true) {
-            c.av_packet_unref(self.packet);
-            if (c.av_read_frame(self.fmt_ctx, self.packet) < 0) {
-                std.log.err("failed to read frame", .{});
-                return error.InvalidData;
-            }
+            const next_frame = self.readNextFrame() catch |e| {
+                if (e == VideoDecoderError.Again) {
+                    continue;
+                }
 
-            if (self.packet.stream_index != stream_idx) {
-                continue;
-            }
-
-            if (c.avcodec_send_packet(self.decoder_ctx, self.packet) < 0) {
-                std.log.err("failed to send packet to decoder", .{});
-                return VideoDecoderError.InvalidData;
-            }
-
-            if (c.avcodec_receive_frame(self.decoder_ctx, self.frame) < 0) {
-                std.log.err("failed to turn packet into frame", .{});
-                return VideoDecoderError.InvalidData;
-            }
-
-            if (self.frame.format != c.AV_PIX_FMT_YUV420P) {
-                // Major assumption made in OpenGL conversion about data format
-                std.log.err("Unsupported frame format: {s}", .{c.av_get_pix_fmt_name(self.frame.format)});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            const width: usize = @intCast(self.frame.width);
-            const height: usize = @intCast(self.frame.height);
-            const stride: usize = @intCast(self.frame.linesize[0]);
-
-            const colorspace = resolveColorspaceYuv(self.frame.colorspace, height);
-
-            if (colorspace != c.AVCOL_SPC_BT470BG) {
-                // Major assumption made in OpenGL conversion about data format
-                std.log.err("Unsupported colorspace: {d}", .{self.frame.colorspace});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            if (self.frame.linesize[1] != @divTrunc(self.frame.linesize[0], 2) or self.frame.linesize[2] != @divTrunc(self.frame.linesize[0], 2)) {
-                std.log.err("Assumption that UV channel stride is half Y stride is not true", .{});
-                return VideoDecoderError.Unimplemented;
-            }
-
-            const y = self.frame.data[0][0 .. stride * height];
-            const u = self.frame.data[1][0 .. y.len / 4];
-            const v = self.frame.data[2][0 .. y.len / 4];
-
-            var pts: f32 = @floatFromInt(self.frame.pts);
-            const time_base = self.fmt_ctx.streams[stream_idx].*.time_base;
-            pts *= @floatFromInt(time_base.num);
-            pts /= @floatFromInt(time_base.den);
-
-            return .{
-                .stride = @intCast(stride),
-                .width = width,
-                .height = height,
-                .y = y,
-                .u = u,
-                .v = v,
-                .pts = pts,
+                return e;
             };
+
+            const decoder_ctx = self.decoder_ctxs.items[next_frame.stream_id];
+
+            switch (decoder_ctx.codec.*.type) {
+                c.AVMEDIA_TYPE_VIDEO => {
+                    return try self.handleVideoFrame(next_frame.frame_id);
+                },
+                c.AVMEDIA_TYPE_AUDIO => {
+                    return try self.handleAudioFrame(next_frame.frame_id);
+                },
+                else => {
+                    std.log.warn("Unknown codec type: {d}", .{decoder_ctx.codec.*.type});
+                    return null;
+                },
+            }
         }
     }
 };
+
+fn makeFrame() VideoDecoderError!*c.AVFrame {
+    return c.av_frame_alloc() orelse {
+        std.log.err("Failed to alloc frame", .{});
+        return VideoDecoderError.OutOfMemory;
+    };
+}
+
+fn cIntToUsize(in: c_int, purpose: []const u8) !usize {
+    if (in < 0) {
+        std.log.err("{s} was negative", .{purpose});
+        return VideoDecoderError.InvalidData;
+    }
+    return @intCast(in);
+}
