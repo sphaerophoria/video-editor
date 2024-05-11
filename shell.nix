@@ -18,6 +18,7 @@ pkgs.mkShell {
     glfw
     libGL
     ffmpeg
+    libpulseaudio
   ];
 }
 

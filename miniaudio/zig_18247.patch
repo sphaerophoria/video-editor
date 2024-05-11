@@ -1,0 +1,38 @@
+--- miniaudio.h	2024-05-09 15:09:33.966673423 -0700
++++ miniaudio.h_	2024-05-09 15:03:58.688300510 -0700
+@@ -6785,7 +6785,7 @@
+ due to things like an incoming phone call. Currently this is only implemented on iOS. None of the
+ Android backends will report this notification.
+ */
+-typedef void (* ma_device_notification_proc)(const ma_device_notification* pNotification);
++typedef void (* ma_device_notification_proc)(const void* pNotification);
+ 
+ 
+ /*
+@@ -6828,7 +6828,7 @@
+ 
+ The proper way to stop the device is to call `ma_device_stop()` from a different thread, normally the main application thread.
+ */
+-typedef void (* ma_device_data_proc)(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
++typedef void (* ma_device_data_proc)(void* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
+ 
+ 
+ 
+@@ -6852,7 +6852,7 @@
+ -------
+ Do not restart or uninitialize the device from the callback.
+ */
+-typedef void (* ma_stop_proc)(ma_device* pDevice);  /* DEPRECATED. Use ma_device_notification_proc instead. */
++typedef void (* ma_stop_proc)(void* pDevice);  /* DEPRECATED. Use ma_device_notification_proc instead. */
+ 
+ typedef enum
+ {
+@@ -16187,7 +16187,7 @@
+ static ma_result ma_mutex_init__posix(ma_mutex* pMutex)
+ {
+     int result;
+-    
++
+     if (pMutex == NULL) {
+         return MA_INVALID_ARGS;
+     }

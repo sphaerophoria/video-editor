@@ -5,4 +5,5 @@ pub usingnamespace @cImport({
     @cInclude("libavutil/imgutils.h");
     @cInclude("glad/glad.h");
     @cInclude("GLFW/glfw3.h");
+    @cInclude("miniaudio.h");
 });

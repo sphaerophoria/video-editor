@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig");
+const audio = @import("audio.zig");
 const Allocator = std.mem.Allocator;
 
 pub const FramePool = struct {
@@ -77,12 +78,16 @@ pub const VideoFrame = struct {
     }
 };
 
-pub const AudioFormat = enum {
-    f32,
+pub const AudioStreamInfo = struct {
+    stream_id: usize,
+    format: audio.Format,
+    sample_rate: usize,
+    num_channels: usize,
 };
 
 pub const AudioFrame = struct {
-    stream_id: usize,
+    info: AudioStreamInfo,
+    num_samples: usize,
     channel_data: std.ArrayList([]const u8),
     frame_pool: *FramePool,
     frame_id: usize,
@@ -101,6 +106,60 @@ pub const Frame = union(enum) {
         switch (self.*) {
             .audio => |*af| af.deinit(),
             .video => |*vf| vf.deinit(),
+        }
+    }
+};
+
+pub const StreamIt = struct {
+    fmt_ctx: *c.AVFormatContext,
+    i: usize,
+
+    const Output = union(enum) {
+        video: struct {
+            stream_id: usize,
+        },
+        audio: AudioStreamInfo,
+        unknown: void,
+    };
+
+    pub fn next(self: *StreamIt) !?Output {
+        if (self.i >= self.fmt_ctx.nb_streams) {
+            return null;
+        }
+
+        defer self.i += 1;
+        const stream: *c.AVStream = self.fmt_ctx.streams[self.i];
+        const id = try cIntToUsize(stream.id, "stream id");
+        const codec_params = stream.codecpar.*;
+        const codec_type = codec_params.codec_type;
+
+        switch (codec_type) {
+            c.AVMEDIA_TYPE_VIDEO => {
+                return .{
+                    .video = .{
+                        .stream_id = id,
+                    },
+                };
+            },
+            c.AVMEDIA_TYPE_AUDIO => {
+                const format = try ffmpegFormatToAudioFormat(codec_params.format);
+                const sample_rate = try cIntToUsize(codec_params.sample_rate, "sample rate");
+                const num_channels = try cIntToUsize(codec_params.ch_layout.nb_channels, "number of channels");
+                return .{
+                    .audio = .{
+                        .stream_id = id,
+                        .format = format,
+                        .sample_rate = sample_rate,
+                        .num_channels = num_channels,
+                    },
+                };
+            },
+            else => {
+                std.log.err("Unhandled codec type: {d}", .{codec_type});
+                return .{
+                    .unknown = {},
+                };
+            },
         }
     }
 };
@@ -224,6 +283,13 @@ pub const VideoDecoder = struct {
         };
     }
 
+    pub fn streams(self: *VideoDecoder) StreamIt {
+        return .{
+            .fmt_ctx = self.fmt_ctx,
+            .i = 0,
+        };
+    }
+
     pub fn deinit(self: *VideoDecoder) void {
         c.av_packet_free(@ptrCast(&self.packet));
         self.frame_pool.deinit();
@@ -282,11 +348,15 @@ pub const VideoDecoder = struct {
 
     pub fn handleAudioFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!?Frame {
         const frame = self.frame_pool.pool.items[frame_id];
+
+        const format = try ffmpegFormatToAudioFormat(frame.format);
+
         var channel_data = std.ArrayList([]const u8).init(self.alloc);
         errdefer channel_data.deinit();
 
         const nb_channels = try cIntToUsize(frame.ch_layout.nb_channels, "frame channels");
-        const data_len = try cIntToUsize(frame.linesize[0], "audio data length");
+        const data_len = try cIntToUsize(frame.linesize[0], "audio data length") / nb_channels;
+        const nb_samples = try cIntToUsize(frame.nb_samples, "audio samples");
 
         for (0..nb_channels) |c_num| {
             const data_ptr = frame.extended_data[c_num];
@@ -295,12 +365,20 @@ pub const VideoDecoder = struct {
 
         std.debug.assert(self.packet.stream_index >= 0); // Should have been checked in parent function
 
-        return .{ .audio = .{
-            .stream_id = @intCast(self.packet.stream_index),
-            .channel_data = channel_data,
-            .frame_pool = &self.frame_pool,
-            .frame_id = frame_id,
-        } };
+        return .{
+            .audio = .{
+                .info = .{
+                    .stream_id = @intCast(self.packet.stream_index),
+                    .format = format,
+                    .sample_rate = @intCast(frame.sample_rate),
+                    .num_channels = channel_data.items.len,
+                },
+                .num_samples = nb_samples,
+                .channel_data = channel_data,
+                .frame_pool = &self.frame_pool,
+                .frame_id = frame_id,
+            },
+        };
     }
 
     const NextFrame = struct {
@@ -389,4 +467,16 @@ fn cIntToUsize(in: c_int, purpose: []const u8) !usize {
         return VideoDecoderError.InvalidData;
     }
     return @intCast(in);
+}
+
+fn ffmpegFormatToAudioFormat(format: c_int) VideoDecoderError!audio.Format {
+    switch (format) {
+        c.AV_SAMPLE_FMT_FLTP => {
+            return audio.Format.f32;
+        },
+        else => {
+            std.log.err("Unhandled audio sample format: {d}", .{format});
+            return VideoDecoderError.Unimplemented;
+        },
+    }
 }

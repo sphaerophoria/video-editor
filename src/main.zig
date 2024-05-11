@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("c.zig");
 const Gui = @import("Gui.zig");
 const decoder = @import("decoder.zig");
+const audio = @import("audio.zig");
 
 const PlayerState = struct {
     start_time: std.time.Instant,
@@ -143,7 +144,7 @@ const Args = struct {
     }
 };
 
-fn getNextVideoFrame(dec: *decoder.VideoDecoder) !decoder.VideoFrame {
+fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !decoder.VideoFrame {
     while (true) {
         var frame = try dec.next();
         if (frame == null) {
@@ -152,7 +153,14 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder) !decoder.VideoFrame {
 
         switch (frame.?) {
             .audio => |*af| {
-                af.deinit();
+                if (audio_player) |p| {
+                    p.pushFrame(af.*) catch {
+                        std.log.err("Audio thread falling behind, dropping frame", .{});
+                        af.deinit();
+                    };
+                } else {
+                    af.deinit();
+                }
             },
             .video => |vf| {
                 return vf;
@@ -176,12 +184,40 @@ pub fn main() !void {
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
 
-    var img: decoder.VideoFrame = try getNextVideoFrame(&dec);
-    defer img.deinit();
+    var streams = dec.streams();
+    var audio_player: ?*audio.Player = null;
+    defer {
+        if (audio_player) |p| {
+            p.deinit();
+        }
+    }
+
+    while (try streams.next()) |stream| {
+        switch (stream) {
+            .audio => |params| {
+                audio_player = try audio.Player.init(alloc, .{
+                    .channels = params.num_channels,
+                    .format = params.format,
+                    .sample_rate = params.sample_rate,
+                });
+                // No UI for dealing with multiple streams, video ignored
+                break;
+            },
+            else => {},
+        }
+    }
 
     var player_state = PlayerState.init(try std.time.Instant.now());
 
+    var img: decoder.VideoFrame = try getNextVideoFrame(&dec, audio_player);
+    defer img.deinit();
+
+    if (audio_player) |p| {
+        try p.start();
+    }
+
     var i: usize = 0;
+
     while (!gui.shouldClose()) {
         defer i += 1;
         const now = try std.time.Instant.now();
@@ -200,7 +236,7 @@ pub fn main() !void {
         while (player_state.shouldUpdateFrame(now, img.pts)) {
             gui.swapFrame(img);
 
-            var new_img = try getNextVideoFrame(&dec);
+            var new_img = try getNextVideoFrame(&dec, audio_player);
             if (img.stream_id != new_img.stream_id) {
                 std.log.warn("Ignoring frame from new video stream", .{});
                 new_img.deinit();
