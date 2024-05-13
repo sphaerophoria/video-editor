@@ -29,18 +29,22 @@ pub const FramePool = struct {
         self.free_ids.deinit();
     }
 
+    fn allocateFrame(self: *FramePool) VideoDecoderError!void {
+        var new_frame = try makeFrame();
+        errdefer c.av_frame_free(@ptrCast(&new_frame));
+
+        try self.pool.append(new_frame);
+        errdefer _ = self.pool.pop();
+
+        try self.free_ids.append(self.pool.items.len - 1);
+    }
+
     pub fn acquire(self: *FramePool) VideoDecoderError!usize {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (self.free_ids.items.len == 0) {
-            try self.pool.append(try makeFrame());
-            self.free_ids.append(self.pool.items.len - 1) catch |e| {
-                var f = self.pool.pop();
-                c.av_frame_free(@ptrCast(&f));
-
-                return e;
-            };
+            try self.allocateFrame();
         }
         return self.free_ids.pop();
     }
