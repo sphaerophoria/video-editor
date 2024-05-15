@@ -3,7 +3,6 @@ pub usingnamespace @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavutil/samplefmt.h");
     @cInclude("libavutil/imgutils.h");
-    @cInclude("glad/glad.h");
-    @cInclude("GLFW/glfw3.h");
     @cInclude("miniaudio.h");
+    @cInclude("gui.h");
 });

@@ -1,6 +1,8 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const c = @import("c.zig");
-const Gui = @import("Gui.zig");
+const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
 
@@ -57,11 +59,9 @@ const ArgParseError = std.process.ArgIterator.InitError;
 const Args = struct {
     it: std.process.ArgIterator,
     input: [:0]const u8,
-    lint: bool,
 
     const Switch = enum {
         @"--input",
-        @"--lint",
         @"--help",
 
         fn parse(s: []const u8) ?Switch {
@@ -82,7 +82,6 @@ const Args = struct {
     pub fn init(alloc: std.mem.Allocator) ArgParseError!Args {
         var args = try std.process.argsWithAllocator(alloc);
 
-        var lint = false;
         var input: ?[:0]const u8 = null;
         const process_name = args.next() orelse "video-editor";
         while (args.next()) |arg| {
@@ -98,9 +97,6 @@ const Args = struct {
                         help(process_name);
                     };
                 },
-                .@"--lint" => {
-                    lint = true;
-                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -112,7 +108,6 @@ const Args = struct {
             .input = input orelse {
                 unreachable;
             },
-            .lint = lint,
         };
     }
 
@@ -125,9 +120,6 @@ const Args = struct {
             switch (value) {
                 .@"--input" => {
                     print("File to work with", .{});
-                },
-                .@"--lint" => {
-                    print("Optional, if passed will set params to make linting easier", .{});
                 },
                 .@"--help" => {
                     print("Show this help", .{});
@@ -169,22 +161,11 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const alloc = gpa.allocator();
-
-    var args = try Args.init(alloc);
-    defer args.deinit();
-
-    var gui = try Gui.init();
-    defer gui.deinit();
-
+fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool)) !void {
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
+    defer frame_renderer.deinit();
 
-    var streams = dec.streams();
     var audio_player: ?*audio.Player = null;
     defer {
         if (audio_player) |p| {
@@ -192,6 +173,7 @@ pub fn main() !void {
         }
     }
 
+    var streams = dec.streams();
     while (try streams.next()) |stream| {
         switch (stream) {
             .audio => |params| {
@@ -209,52 +191,56 @@ pub fn main() !void {
 
     var player_state = PlayerState.init(try std.time.Instant.now());
 
-    var img: decoder.VideoFrame = try getNextVideoFrame(&dec, audio_player);
-    defer img.deinit();
+    const img = try getNextVideoFrame(&dec, audio_player);
+    var last_pts = img.pts;
+    const stream_id = img.stream_id;
+    frame_renderer.swapFrame(img);
 
     if (audio_player) |p| {
         try p.start();
     }
 
-    var i: usize = 0;
-
-    while (!gui.shouldClose()) {
-        defer i += 1;
+    while (!should_quit.load(std.builtin.AtomicOrder.unordered)) {
         const now = try std.time.Instant.now();
 
-        var actions = gui.getActions(alloc);
-        defer actions.deinit();
-
-        for (actions.items) |action| {
-            switch (action) {
-                .toggle_pause => {
-                    player_state.togglePause(now);
-                },
-            }
-        }
-
-        while (player_state.shouldUpdateFrame(now, img.pts)) {
-            gui.swapFrame(img);
-
+        while (player_state.shouldUpdateFrame(now, last_pts)) {
             var new_img = try getNextVideoFrame(&dec, audio_player);
-            if (img.stream_id != new_img.stream_id) {
+            if (stream_id != new_img.stream_id) {
                 std.log.warn("Ignoring frame from new video stream", .{});
                 new_img.deinit();
                 continue;
             }
 
-            img.deinit();
-            img = new_img;
-
-            if (args.lint) {
-                break;
-            }
+            last_pts = new_img.pts;
+            frame_renderer.swapFrame(new_img);
         }
 
-        gui.render();
-
-        if (args.lint and i > 20) {
-            gui.setClose();
-        }
+        std.time.sleep(10_000_000);
     }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    const alloc = gpa.allocator();
+
+    var args = try Args.init(alloc);
+    defer args.deinit();
+
+    var frame_renderer_shared = FrameRenderer.SharedData{};
+
+    var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
+    var should_quit = std.atomic.Value(bool).init(false);
+
+    const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{
+        alloc,
+        args,
+        &frame_renderer_shared,
+        &should_quit,
+    });
+
+    c.gui_run(&frame_renderer);
+    should_quit.store(true, std.builtin.AtomicOrder.unordered);
+    main_loop_thread.join();
 }
