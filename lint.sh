@@ -4,6 +4,9 @@ set -ex
 
 zig build --summary all
 zig fmt src --check
+pushd ./src/gui/rust
+cargo fmt --check
+popd
 
 zig build -Dfake_ui --summary all
 valgrind \

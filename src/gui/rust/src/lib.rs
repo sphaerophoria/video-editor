@@ -58,15 +58,18 @@ impl eframe::App for Gui {
 
             let callback = egui::PaintCallback {
                 rect,
-                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
-                    move |_info, painter| {
-                        let renderer = &renderer;
-                        unsafe {
-                            let userdata: *const glow::Context = &**painter.gl();
-                            c_bindings::framerenderer_render(renderer.0, rect.width(), rect.height(), userdata as *mut c_void);
-                        }
-                    },
-                )),
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    let renderer = &renderer;
+                    unsafe {
+                        let userdata: *const glow::Context = &**painter.gl();
+                        c_bindings::framerenderer_render(
+                            renderer.0,
+                            rect.width(),
+                            rect.height(),
+                            userdata as *mut c_void,
+                        );
+                    }
+                })),
             };
             ui.painter().add(callback);
         });
