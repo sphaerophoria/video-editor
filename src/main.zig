@@ -178,7 +178,7 @@ const AppState = struct {
     }
 };
 
-fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool), gui: ?*c.Gui, app_state: *AppState) !void {
+fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, gui: ?*c.Gui, app_state: *AppState) !void {
     // If main thread init fails, we need to close the GUI, but if the GUI
     // hadn't launched yet it will miss the shutdown notification and stay
     // open forever
@@ -224,7 +224,7 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
         try p.start();
     }
 
-    while (!should_quit.load(std.builtin.AtomicOrder.unordered)) {
+    while (true) {
         const now = try std.time.Instant.now();
 
         while (true) {
@@ -236,6 +236,9 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
                 },
                 c.gui_action_none => {
                     break;
+                },
+                c.gui_action_close => {
+                    return;
                 },
                 else => {
                     std.debug.panic("invalid action: {d}", .{action});
@@ -278,7 +281,6 @@ pub fn main() !void {
     var frame_renderer_shared = FrameRenderer.SharedData{};
 
     var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
-    var should_quit = std.atomic.Value(bool).init(false);
 
     var app_state = AppState{
         .mutex = .{},
@@ -296,12 +298,10 @@ pub fn main() !void {
         alloc,
         args,
         &frame_renderer_shared,
-        &should_quit,
         gui,
         &app_state,
     });
 
     c.gui_run(gui, &frame_renderer);
-    should_quit.store(true, std.builtin.AtomicOrder.unordered);
     main_loop_thread.join();
 }

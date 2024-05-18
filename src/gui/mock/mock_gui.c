@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #define MAX_ALLOCATIONS 100
 struct GuiImpl {
+	bool finished;
 	unsigned int allocation_id;
 	void* allocations[MAX_ALLOCATIONS];
 };
@@ -57,6 +59,7 @@ void   guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) 
 // GUI interface
 Gui* gui_init(AppState* state) {
 	struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
+	impl->finished = false;
 	impl->allocation_id = 0;
 	memset(impl->allocations, 0, MAX_ALLOCATIONS);
 
@@ -75,10 +78,16 @@ void gui_run(Gui* gui, Renderer* renderer) {
 		sleep(1);
 	}
 	framerenderer_deinit_gl(renderer, gui);
+	impl->finished = true;
 }
 
 enum GuiAction gui_next_action(Gui* gui) {
-	return gui_action_none;
+	struct GuiImpl* impl = gui;
+	if (impl->finished) {
+	    return gui_action_close;
+	} else {
+	    return gui_action_none;
+	}
 }
 
 void gui_wait_start(Gui* gui) {}

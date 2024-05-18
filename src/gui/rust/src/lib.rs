@@ -87,7 +87,11 @@ pub unsafe extern "C" fn gui_next_action(gui: *mut Gui) -> c_bindings::GuiAction
         return v;
     }
 
-    c_bindings::GuiAction_gui_action_none
+    if inner.ctx.is_some() {
+        c_bindings::GuiAction_gui_action_none
+    } else {
+        c_bindings::GuiAction_gui_action_close
+    }
 }
 
 #[no_mangle]
@@ -219,6 +223,7 @@ impl eframe::App for EframeImpl {
             let gl = gl.unwrap();
             let userdata: *const glow::Context = gl;
             c_bindings::framerenderer_deinit_gl(self.renderer.0, userdata as *mut c_void);
+            (*self.gui).inner.lock().unwrap().ctx = None;
         }
     }
 }

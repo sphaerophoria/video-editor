@@ -11,6 +11,7 @@ typedef void AppState;
 
 enum GuiAction {
     gui_action_toggle_pause,
+    gui_action_close,
     gui_action_none,
 };
 
