@@ -6,6 +6,7 @@ zig build --summary all
 zig fmt src --check
 pushd ./src/gui/rust
 cargo fmt --check
+cargo clippy -- -Dclippy::all -Aclippy::missing_safety_doc
 popd
 
 pushd src/gui/mock/

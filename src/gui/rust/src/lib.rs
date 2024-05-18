@@ -29,7 +29,7 @@ pub struct Gui {
 }
 
 #[no_mangle]
-pub extern "C" fn gui_init(state: *mut c_bindings::AppState) -> *mut Gui {
+pub unsafe extern "C" fn gui_init(state: *mut c_bindings::AppState) -> *mut Gui {
     let (action_tx, action_rx) = mpsc::channel();
 
     let inner = GuiInner {
@@ -48,14 +48,12 @@ pub extern "C" fn gui_init(state: *mut c_bindings::AppState) -> *mut Gui {
 }
 
 #[no_mangle]
-pub extern "C" fn gui_free(gui: *mut Gui) {
-    unsafe {
-        drop(Box::from_raw(gui));
-    }
+pub unsafe extern "C" fn gui_free(gui: *mut Gui) {
+    drop(Box::from_raw(gui));
 }
 
 #[no_mangle]
-pub extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
+pub unsafe extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([350.0, 380.0]),
         multisampling: 4,
@@ -68,12 +66,10 @@ pub extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
         "video editor",
         options,
         Box::new(move |cc| {
-            let action_tx = unsafe {
-                let mut inner = (*gui).inner.lock().unwrap();
-                inner.ctx = Some(cc.egui_ctx.clone());
-                (*gui).cond.notify_all();
-                inner.action_tx.clone()
-            };
+            let mut inner = (*gui).inner.lock().unwrap();
+            inner.ctx = Some(cc.egui_ctx.clone());
+            (*gui).cond.notify_all();
+            let action_tx = inner.action_tx.clone();
             Box::new(EframeImpl::new(cc, renderer, gui, action_tx))
         }),
     )
@@ -182,17 +178,15 @@ impl eframe::App for EframeImpl {
 
             ui.input(|input| {
                 for event in &input.events {
-                    match event {
-                        egui::Event::Key {
-                            key: egui::Key::Space,
-                            pressed: true,
-                            ..
-                        } => {
-                            self.action_tx
-                                .send(c_bindings::GuiAction_gui_action_toggle_pause)
-                                .expect("failed to send action from gui");
-                        }
-                        _ => (),
+                    if let egui::Event::Key {
+                        key: egui::Key::Space,
+                        pressed: true,
+                        ..
+                    } = event
+                    {
+                        self.action_tx
+                            .send(c_bindings::GuiAction_gui_action_toggle_pause)
+                            .expect("failed to send action from gui");
                     }
                 }
             });
