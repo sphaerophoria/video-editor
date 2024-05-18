@@ -1,13 +1,21 @@
 #include <gui.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+enum GuiState {
+  kGuiStateFinished,
+  kGuiStateTogglePause,
+  kGuiStateNormal,
+};
+
 #define MAX_ALLOCATIONS 100
 struct GuiImpl {
-  bool finished;
+  pthread_mutex_t state_mutex;
+  enum GuiState state;
   unsigned int allocation_id;
   void* allocations[MAX_ALLOCATIONS];
 };
@@ -136,7 +144,8 @@ void guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {
 Gui* gui_init(AppState* state) {
   (void)state;
   struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
-  impl->finished = false;
+  pthread_mutex_init(&impl->state_mutex, NULL);
+  impl->state = kGuiStateNormal;
   impl->allocation_id = 0;
   memset(impl->allocations, 0, MAX_ALLOCATIONS);
 
@@ -148,21 +157,50 @@ void gui_free(Gui* gui) { free(gui); }
 void gui_run(Gui* gui, Renderer* renderer) {
   struct GuiImpl* impl = gui;
   framerenderer_init_gl(renderer, gui);
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 60 * 3; ++i) {
     framerenderer_render(renderer, 800.0, 600.0, gui);
-    sleep(1);
+    if (i % 30 == 0) {
+      pthread_mutex_lock(&impl->state_mutex);
+      impl->state = kGuiStateTogglePause;
+      pthread_mutex_unlock(&impl->state_mutex);
+    }
+    // 60fps
+    usleep(16666);
   }
   framerenderer_deinit_gl(renderer, gui);
-  impl->finished = true;
+
+  pthread_mutex_lock(&impl->state_mutex);
+  impl->state = kGuiStateFinished;
+  pthread_mutex_unlock(&impl->state_mutex);
 }
 
 enum GuiAction gui_next_action(Gui* gui) {
   struct GuiImpl* impl = gui;
-  if (impl->finished) {
-    return gui_action_close;
+  pthread_mutex_lock(&impl->state_mutex);
+  enum GuiAction ret = gui_action_close;
+
+  switch (impl->state) {
+    case kGuiStateNormal: {
+      ret = gui_action_none;
+      break;
+    }
+    case kGuiStateTogglePause: {
+      impl->state = kGuiStateNormal;
+      ret = gui_action_toggle_pause;
+      break;
+    }
+    case kGuiStateFinished: {
+      ret = gui_action_close;
+      break;
+    }
+    default: {
+      fprintf(stderr, "gui in invalid state\n");
+      exit(1);
+    }
   }
 
-  return gui_action_none;
+  pthread_mutex_unlock(&impl->state_mutex);
+  return ret;
 }
 
 void gui_wait_start(Gui* gui) { (void)gui; }
