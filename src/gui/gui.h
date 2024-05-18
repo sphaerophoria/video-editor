@@ -16,6 +16,8 @@ enum GuiAction {
 
 struct AppStateSnapshot {
     bool paused;
+    float current_position;
+    float total_runtime;
 };
 
 // GUI interface

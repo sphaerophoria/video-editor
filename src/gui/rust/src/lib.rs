@@ -130,15 +130,29 @@ impl eframe::App for EframeImpl {
         let mut frame = egui::Frame::central_panel(&ctx.style());
         frame.inner_margin = egui::Margin::same(0.0);
         egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
-            let state = unsafe { c_bindings::appstate_snapshot((*self.gui).state) };
+            let mut state = unsafe { c_bindings::appstate_snapshot((*self.gui).state) };
 
             let button_text = if state.paused { "play" } else { "pause" };
 
-            if ui.button(button_text).clicked() {
-                self.action_tx
-                    .send(c_bindings::GuiAction_gui_action_toggle_pause)
-                    .expect("failed to send action from gui");
-            };
+            ui.horizontal(|ui| {
+                if ui.button(button_text).clicked() {
+                    self.action_tx
+                        .send(c_bindings::GuiAction_gui_action_toggle_pause)
+                        .expect("failed to send action from gui");
+                };
+
+                ui.with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
+                    ui.label(format!(
+                        "{:.02}/{:.02}",
+                        state.current_position, state.total_runtime
+                    ));
+                    ui.spacing_mut().slider_width = ui.available_width();
+                    ui.add(
+                        egui::Slider::new(&mut state.current_position, 0.0..=state.total_runtime)
+                            .show_value(false),
+                    );
+                });
+            });
         });
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let rect = ui.max_rect();

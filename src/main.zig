@@ -182,6 +182,7 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
     defer frame_renderer.deinit();
+    const total_runtime = dec.duration();
 
     var audio_player: ?*audio.Player = null;
     defer {
@@ -251,6 +252,8 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
 
         app_state.setSnapshot(.{
             .paused = player_state.isPaused(),
+            .current_position = last_pts,
+            .total_runtime = total_runtime,
         });
 
         std.time.sleep(10_000_000);
@@ -275,6 +278,8 @@ pub fn main() !void {
         .mutex = .{},
         .inner = .{
             .paused = false,
+            .current_position = 0.0,
+            .total_runtime = 0.0,
         },
     };
 

@@ -298,6 +298,16 @@ pub const VideoDecoder = struct {
         c.avformat_free_context(self.fmt_ctx);
     }
 
+    pub fn duration(self: *VideoDecoder) f32 {
+        if (self.fmt_ctx.nb_streams < 1) {
+            return 0.0;
+        }
+
+        const stream_id = 0;
+        const stream = self.fmt_ctx.streams[stream_id].*;
+        return applyTimeBase(stream.duration, stream.time_base);
+    }
+
     pub fn handleVideoFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!Frame {
         const frame = self.frame_pool.pool.items[frame_id];
         if (frame.format != c.AV_PIX_FMT_YUV420P) {
@@ -327,10 +337,8 @@ pub const VideoDecoder = struct {
         const u = frame.data[1][0 .. y.len / 4];
         const v = frame.data[2][0 .. y.len / 4];
 
-        var pts: f32 = @floatFromInt(frame.pts);
         const time_base = self.fmt_ctx.streams[@intCast(self.packet.stream_index)].*.time_base;
-        pts *= @floatFromInt(time_base.num);
-        pts /= @floatFromInt(time_base.den);
+        const pts = applyTimeBase(frame.pts, time_base);
 
         return .{ .video = .{
             .stream_id = @intCast(self.packet.stream_index),
@@ -479,4 +487,11 @@ fn ffmpegFormatToAudioFormat(format: c_int) VideoDecoderError!audio.Format {
             return VideoDecoderError.Unimplemented;
         },
     }
+}
+
+fn applyTimeBase(val_i: i64, time_base: c.AVRational) f32 {
+    var val_f: f32 = @floatFromInt(val_i);
+    val_f *= @floatFromInt(time_base.num);
+    val_f /= @floatFromInt(time_base.den);
+    return val_f;
 }
