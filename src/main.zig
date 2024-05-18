@@ -178,16 +178,19 @@ const AppState = struct {
     }
 };
 
-fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, gui: ?*c.Gui, app_state: *AppState) !void {
+fn main_loop(
+    alloc: Allocator,
+    frame_renderer: *FrameRenderer.SharedData,
+    gui: ?*c.Gui,
+    app_state: *AppState,
+    dec: *decoder.VideoDecoder,
+) !void {
     // If main thread init fails, we need to close the GUI, but if the GUI
     // hadn't launched yet it will miss the shutdown notification and stay
     // open forever
     c.gui_wait_start(gui);
     defer c.gui_close(gui);
 
-    var dec = try decoder.VideoDecoder.init(alloc, args.input);
-    defer dec.deinit();
-    defer frame_renderer.deinit();
     const total_runtime = dec.duration();
 
     var audio_player: ?*audio.Player = null;
@@ -215,7 +218,7 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
 
     var player_state = PlayerState.init(try std.time.Instant.now());
 
-    const img = try getNextVideoFrame(&dec, audio_player);
+    const img = try getNextVideoFrame(dec, audio_player);
     var last_pts = img.pts;
     const stream_id = img.stream_id;
     frame_renderer.swapFrame(img);
@@ -247,7 +250,7 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
         }
 
         while (player_state.shouldUpdateFrame(now, last_pts)) {
-            var new_img = try getNextVideoFrame(&dec, audio_player);
+            var new_img = try getNextVideoFrame(dec, audio_player);
             if (stream_id != new_img.stream_id) {
                 std.log.warn("Ignoring frame from new video stream", .{});
                 new_img.deinit();
@@ -278,7 +281,11 @@ pub fn main() !void {
     var args = try Args.init(alloc);
     defer args.deinit();
 
+    var dec = try decoder.VideoDecoder.init(alloc, args.input);
+    defer dec.deinit();
+
     var frame_renderer_shared = FrameRenderer.SharedData{};
+    defer frame_renderer_shared.deinit();
 
     var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
 
@@ -296,10 +303,10 @@ pub fn main() !void {
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{
         alloc,
-        args,
         &frame_renderer_shared,
         gui,
         &app_state,
+        &dec,
     });
 
     c.gui_run(gui, &frame_renderer);
