@@ -5,9 +5,14 @@
 
 typedef void Renderer;
 typedef void GuiGl;
+typedef void Gui;
+
 
 // GUI interface
-void gui_run(Renderer* renderer);
+Gui* gui_init(void);
+void gui_free(Gui* gui);
+void gui_run(Gui* gui, Renderer* renderer);
+void gui_notify_update(Gui* gui);
 
 // Gui OpenGL wrappers
 // GUI owns window creation, and has to draw widgets to the screen. This means

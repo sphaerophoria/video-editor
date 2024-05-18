@@ -2,18 +2,20 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-struct GuiGlImpl {
+#define MAX_ALLOCATIONS 100
+struct GuiImpl {
 	unsigned int allocation_id;
-	void* allocations[100];
+	void* allocations[MAX_ALLOCATIONS];
 };
 
-static GLuint impl_alloc(struct GuiGlImpl* impl) {
+static GLuint impl_alloc(struct GuiImpl* impl) {
 	impl->allocations[impl->allocation_id] = malloc(1);
 	return impl->allocation_id++;
 }
 
-static void impl_free(struct GuiGlImpl* impl, GLuint id) {
+static void impl_free(struct GuiImpl* impl, GLuint id) {
 	free(impl->allocations[id]);
 }
 
@@ -52,16 +54,27 @@ GLint  guigl_get_uniform_location(GuiGl* guigl, GLuint program, const GLchar * n
 }
 void   guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {}
 
+// GUI interface
+Gui* gui_init(void) {
+	struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
+	impl->allocation_id = 0;
+	memset(impl->allocations, 0, MAX_ALLOCATIONS);
 
-void gui_run(Renderer* renderer) {
-	struct GuiGlImpl impl = {
-		.allocation_id = 0,
-		.allocations = {0},
-	};
-	framerenderer_init_gl(renderer, &impl);
+	return impl;
+}
+
+void gui_free(Gui* gui) {
+	free(gui);
+}
+
+void gui_run(Gui* gui, Renderer* renderer) {
+	struct GuiImpl* impl = gui;
+	framerenderer_init_gl(renderer, gui);
 	for (int i = 0; i < 3; ++i)  {
-		framerenderer_render(renderer, 800.0, 600.0, &impl);
+		framerenderer_render(renderer, 800.0, 600.0, gui);
 		sleep(1);
 	}
-	framerenderer_deinit_gl(renderer, &impl);
+	framerenderer_deinit_gl(renderer, gui);
 }
+
+void gui_notify_update(Gui* gui) {}

@@ -161,7 +161,7 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !
     }
 }
 
-fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool)) !void {
+fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool), gui: ?*c.Gui) !void {
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
     defer frame_renderer.deinit();
@@ -213,6 +213,7 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
 
             last_pts = new_img.pts;
             frame_renderer.swapFrame(new_img);
+            c.gui_notify_update(gui);
         }
 
         std.time.sleep(10_000_000);
@@ -233,14 +234,18 @@ pub fn main() !void {
     var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
     var should_quit = std.atomic.Value(bool).init(false);
 
+    const gui = c.gui_init();
+    defer c.gui_free(gui);
+
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{
         alloc,
         args,
         &frame_renderer_shared,
         &should_quit,
+        gui,
     });
 
-    c.gui_run(&frame_renderer);
+    c.gui_run(gui, &frame_renderer);
     should_quit.store(true, std.builtin.AtomicOrder.unordered);
     main_loop_thread.join();
 }
