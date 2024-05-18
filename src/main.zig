@@ -178,27 +178,8 @@ const AppState = struct {
     }
 };
 
-fn main_loop(
-    alloc: Allocator,
-    frame_renderer: *FrameRenderer.SharedData,
-    gui: ?*c.Gui,
-    app_state: *AppState,
-    dec: *decoder.VideoDecoder,
-) !void {
-    // If main thread init fails, we need to close the GUI, but if the GUI
-    // hadn't launched yet it will miss the shutdown notification and stay
-    // open forever
-    c.gui_wait_start(gui);
-    defer c.gui_close(gui);
-
-    const total_runtime = dec.duration();
-
+fn makeAudioPlayer(alloc: Allocator, dec: *decoder.VideoDecoder) !?*audio.Player {
     var audio_player: ?*audio.Player = null;
-    defer {
-        if (audio_player) |p| {
-            p.deinit();
-        }
-    }
 
     var streams = dec.streams();
     while (try streams.next()) |stream| {
@@ -216,6 +197,26 @@ fn main_loop(
         }
     }
 
+    return audio_player;
+}
+
+fn main_loop(
+    alloc: Allocator,
+    frame_renderer: *FrameRenderer.SharedData,
+    gui: ?*c.Gui,
+    app_state: *AppState,
+    dec: *decoder.VideoDecoder,
+) !void {
+    // If main thread init fails, we need to close the GUI, but if the GUI
+    // hadn't launched yet it will miss the shutdown notification and stay
+    // open forever
+    c.gui_wait_start(gui);
+    defer c.gui_close(gui);
+
+    const total_runtime = dec.duration();
+    const audio_player = try makeAudioPlayer(alloc, dec);
+    defer if (audio_player) |p| p.deinit();
+
     var player_state = PlayerState.init(try std.time.Instant.now());
 
     const img = try getNextVideoFrame(dec, audio_player);
@@ -223,9 +224,7 @@ fn main_loop(
     const stream_id = img.stream_id;
     frame_renderer.swapFrame(img);
 
-    if (audio_player) |p| {
-        try p.start();
-    }
+    if (audio_player) |p| try p.start();
 
     while (true) {
         const now = try std.time.Instant.now();
