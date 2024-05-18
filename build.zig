@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const opt = b.standardOptimizeOption(.{});
 
-    const fake_ui = b.option(bool, "fake_ui", "whether we should build the fake UI") orelse  false ;
+    const fake_ui = b.option(bool, "fake_ui", "whether we should build the fake UI") orelse false;
 
     const exe = b.addExecutable(.{
         .name = "video-editor",
@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) !void {
     if (fake_ui) {
         exe.addCSourceFile(.{
             .file = b.path("src/gui/mock/mock_gui.c"),
+            .flags = &.{ "-Wall", "-Wextra", "-Wpedantic", "-Werror" },
         });
     } else {
         const libgui_path = try setupRustGui(b, opt);

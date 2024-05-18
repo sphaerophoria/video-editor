@@ -10,6 +10,7 @@ popd
 
 pushd src/gui/mock/
 clang-format -n -Werror mock_gui.c
+clang-tidy --extra-arg="-I../" mock_gui.c
 popd
 
 zig build -Dfake_ui --summary all

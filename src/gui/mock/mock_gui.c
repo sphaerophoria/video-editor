@@ -22,44 +22,119 @@ static void impl_free(struct GuiImpl* impl, GLuint id) {
 }
 
 GLuint guigl_create_shader(GuiGl* guigl, GLenum shader_type) {
+  (void)shader_type;
   return impl_alloc(guigl);
 }
 
 void guigl_delete_shader(GuiGl* guigl, GLuint shader) {
   impl_free(guigl, shader);
 }
+
 void guigl_shader_source(GuiGl* guigl, GLuint shader,
-                         GLchar const* const* source) {}
-void guigl_compile_shader(GuiGl* guigl, GLuint shader) {}
+                         GLchar const* const* source) {
+  (void)guigl;
+  (void)shader;
+  (void)source;
+}
+
+void guigl_compile_shader(GuiGl* guigl, GLuint shader) {
+  (void)guigl;
+  (void)shader;
+}
+
 GLuint guigl_create_program(GuiGl* guigl) { return impl_alloc(guigl); }
-void guigl_use_program(GuiGl* guigl, GLuint program) {}
+
+void guigl_use_program(GuiGl* guigl, GLuint program) {
+  (void)guigl;
+  (void)program;
+}
+
 void guigl_delete_program(GuiGl* guigl, GLuint program) {
   impl_free(guigl, program);
 }
-void guigl_attach_shader(GuiGl* guigl, GLuint program, GLuint shader) {}
-void guigl_link_program(GuiGl* guigl, GLuint program) {}
+
+void guigl_attach_shader(GuiGl* guigl, GLuint program, GLuint shader) {
+  (void)guigl;
+  (void)program;
+  (void)shader;
+}
+
+void guigl_link_program(GuiGl* guigl, GLuint program) {
+  (void)guigl;
+  (void)program;
+}
+
 GLuint guigl_gen_texture(GuiGl* guigl) { return impl_alloc(guigl); }
+
 void guigl_delete_texture(GuiGl* guigl, GLuint texture) {
   impl_free(guigl, texture);
 }
-void guigl_bind_texture(GuiGl* guigl, GLenum target, GLuint texture) {}
-void guigl_active_texture(GuiGl* guigl, GLuint texture) {}
+
+void guigl_bind_texture(GuiGl* guigl, GLenum target, GLuint texture) {
+  (void)guigl;
+  (void)target;
+  (void)texture;
+}
+
+void guigl_active_texture(GuiGl* guigl, GLuint texture) {
+  (void)guigl;
+  (void)texture;
+}
+
 void guigl_tex_parameter_i(GuiGl* guigl, GLenum target, GLenum name,
-                           GLint param) {}
+                           GLint param) {
+  (void)guigl;
+  (void)target;
+  (void)name;
+  (void)param;
+}
+
 void guigl_tex_image_2d(GuiGl* guigl, GLenum target, GLint level,
                         GLint internal_format, GLsizei width, GLsizei height,
                         GLint border, GLenum format, GLenum typ,
-                        void const* pixels) {}
-void guigl_uniform_1i(GuiGl* guigl, GLint loc, GLint val) {}
-void guigl_uniform_1f(GuiGl* guigl, GLint loc, GLfloat val) {}
+                        void const* pixels) {
+  (void)guigl;
+  (void)target;
+  (void)level;
+  (void)internal_format;
+  (void)width;
+  (void)height;
+  (void)border;
+  (void)format;
+  (void)typ;
+  (void)pixels;
+}
+
+void guigl_uniform_1i(GuiGl* guigl, GLint loc, GLint val) {
+  (void)guigl;
+  (void)loc;
+  (void)val;
+}
+
+void guigl_uniform_1f(GuiGl* guigl, GLint loc, GLfloat val) {
+  (void)guigl;
+  (void)loc;
+  (void)val;
+}
+
 GLint guigl_get_uniform_location(GuiGl* guigl, GLuint program,
                                  GLchar const* name) {
+  (void)guigl;
+  (void)program;
+  (void)name;
   return 0;
 }
-void guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {}
+
+void guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {
+  (void)guigl;
+  (void)mode;
+  (void)first;
+  (void)count;
+}
 
 // GUI interface
 Gui* gui_init(AppState* state) {
+  (void)state;
   struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
   impl->finished = false;
   impl->allocation_id = 0;
@@ -85,11 +160,13 @@ enum GuiAction gui_next_action(Gui* gui) {
   struct GuiImpl* impl = gui;
   if (impl->finished) {
     return gui_action_close;
-  } else {
-    return gui_action_none;
   }
+
+  return gui_action_none;
 }
 
-void gui_wait_start(Gui* gui) {}
-void gui_notify_update(Gui* gui) {}
-void gui_close(Gui* gui) {}
+void gui_wait_start(Gui* gui) { (void)gui; }
+
+void gui_notify_update(Gui* gui) { (void)gui; }
+
+void gui_close(Gui* gui) { (void)gui; }
