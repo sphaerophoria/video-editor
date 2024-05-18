@@ -81,5 +81,7 @@ enum GuiAction gui_next_action(Gui* gui) {
 	return gui_action_none;
 }
 
+void gui_wait_start(Gui* gui) {}
 void gui_notify_update(Gui* gui) {}
+void gui_close(Gui* gui) {}
 

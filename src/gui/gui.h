@@ -25,7 +25,9 @@ Gui* gui_init(AppState* state);
 void gui_free(Gui* gui);
 void gui_run(Gui* gui, Renderer* renderer);
 enum GuiAction gui_next_action(Gui* gui);
+void gui_wait_start(Gui* gui);
 void gui_notify_update(Gui* gui);
+void gui_close(Gui* gui);
 
 // Gui OpenGL wrappers
 // GUI owns window creation, and has to draw widgets to the screen. This means

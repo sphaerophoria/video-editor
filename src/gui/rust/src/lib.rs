@@ -4,7 +4,7 @@ use std::{
     ffi::c_void,
     sync::{
         mpsc::{self, Receiver, Sender},
-        Mutex,
+        Condvar, Mutex,
     },
 };
 
@@ -23,6 +23,7 @@ pub struct GuiInner {
 }
 
 pub struct Gui {
+    cond: Condvar,
     inner: Mutex<GuiInner>,
     state: *mut c_bindings::AppState,
 }
@@ -38,6 +39,7 @@ pub extern "C" fn gui_init(state: *mut c_bindings::AppState) -> *mut Gui {
     };
 
     let gui = Gui {
+        cond: Condvar::new(),
         inner: Mutex::new(inner),
         state,
     };
@@ -69,6 +71,7 @@ pub extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
             let action_tx = unsafe {
                 let mut inner = (*gui).inner.lock().unwrap();
                 inner.ctx = Some(cc.egui_ctx.clone());
+                (*gui).cond.notify_all();
                 inner.action_tx.clone()
             };
             Box::new(EframeImpl::new(cc, renderer, gui, action_tx))
@@ -88,10 +91,26 @@ pub unsafe extern "C" fn gui_next_action(gui: *mut Gui) -> c_bindings::GuiAction
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gui_wait_start(gui: *mut Gui) {
+    let mut inner = (*gui).inner.lock().unwrap();
+    while inner.ctx.is_none() {
+        inner = (*gui).cond.wait(inner).unwrap();
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gui_notify_update(gui: *mut Gui) {
     let gui = (*gui).inner.lock().unwrap();
     if let Some(ctx) = &gui.ctx {
         ctx.request_repaint();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gui_close(gui: *mut Gui) {
+    let gui = (*gui).inner.lock().unwrap();
+    if let Some(ctx) = &gui.ctx {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 

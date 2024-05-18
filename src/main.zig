@@ -179,6 +179,12 @@ const AppState = struct {
 };
 
 fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool), gui: ?*c.Gui, app_state: *AppState) !void {
+    // If main thread init fails, we need to close the GUI, but if the GUI
+    // hadn't launched yet it will miss the shutdown notification and stay
+    // open forever
+    c.gui_wait_start(gui);
+    defer c.gui_close(gui);
+
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
     defer frame_renderer.deinit();
