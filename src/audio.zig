@@ -196,7 +196,6 @@ pub const Player = struct {
 
         while (output_pos < frame_count * device.playback.channels * sample_size) {
             const sample = self.shared.frame_queue.next() orelse {
-                std.log.err("Frame queue empty", .{});
                 return;
             };
             const output_start = output_pos;

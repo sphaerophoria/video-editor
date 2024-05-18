@@ -55,7 +55,7 @@ GLint  guigl_get_uniform_location(GuiGl* guigl, GLuint program, const GLchar * n
 void   guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {}
 
 // GUI interface
-Gui* gui_init(void) {
+Gui* gui_init(AppState* state) {
 	struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
 	impl->allocation_id = 0;
 	memset(impl->allocations, 0, MAX_ALLOCATIONS);
@@ -77,4 +77,9 @@ void gui_run(Gui* gui, Renderer* renderer) {
 	framerenderer_deinit_gl(renderer, gui);
 }
 
+enum GuiAction gui_next_action(Gui* gui) {
+	return gui_action_none;
+}
+
 void gui_notify_update(Gui* gui) {}
+

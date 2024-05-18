@@ -2,16 +2,27 @@
 #define __GUI_COMMON_H__
 
 #include <GL/gl.h>
+#include <stdbool.h>
 
 typedef void Renderer;
 typedef void GuiGl;
 typedef void Gui;
+typedef void AppState;
 
+enum GuiAction {
+    gui_action_toggle_pause,
+    gui_action_none,
+};
+
+struct AppStateSnapshot {
+    bool paused;
+};
 
 // GUI interface
-Gui* gui_init(void);
+Gui* gui_init(AppState* state);
 void gui_free(Gui* gui);
 void gui_run(Gui* gui, Renderer* renderer);
+enum GuiAction gui_next_action(Gui* gui);
 void gui_notify_update(Gui* gui);
 
 // Gui OpenGL wrappers
@@ -42,5 +53,7 @@ void   guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count);
 void framerenderer_init_gl(Renderer* renderer, GuiGl* guigl);
 void framerenderer_render(Renderer* renderer, float width, float height, GuiGl* guigl);
 void framerenderer_deinit_gl(Renderer* renderer, GuiGl* guigl);
+
+struct AppStateSnapshot appstate_snapshot(AppState* app);
 
 #endif // __GUI_H__

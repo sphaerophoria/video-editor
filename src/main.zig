@@ -6,6 +6,12 @@ const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
 
+pub export fn appstate_snapshot(state: *AppState) c.AppStateSnapshot {
+    state.mutex.lock();
+    defer state.mutex.unlock();
+    return state.inner;
+}
+
 const PlayerState = struct {
     start_time: std.time.Instant,
     pause_time: ?std.time.Instant,
@@ -161,7 +167,18 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !
     }
 }
 
-fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool), gui: ?*c.Gui) !void {
+const AppState = struct {
+    mutex: std.Thread.Mutex,
+    inner: c.AppStateSnapshot,
+
+    fn setSnapshot(self: *AppState, snapshot: c.AppStateSnapshot) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.inner = snapshot;
+    }
+};
+
+fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.SharedData, should_quit: *std.atomic.Value(bool), gui: ?*c.Gui, app_state: *AppState) !void {
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
     defer frame_renderer.deinit();
@@ -203,6 +220,22 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
     while (!should_quit.load(std.builtin.AtomicOrder.unordered)) {
         const now = try std.time.Instant.now();
 
+        while (true) {
+            const action = c.gui_next_action(gui);
+            switch (action) {
+                c.gui_action_toggle_pause => {
+                    player_state.togglePause(now);
+                    c.gui_notify_update(gui);
+                },
+                c.gui_action_none => {
+                    break;
+                },
+                else => {
+                    std.debug.panic("invalid action: {d}", .{action});
+                },
+            }
+        }
+
         while (player_state.shouldUpdateFrame(now, last_pts)) {
             var new_img = try getNextVideoFrame(&dec, audio_player);
             if (stream_id != new_img.stream_id) {
@@ -215,6 +248,10 @@ fn main_loop(alloc: Allocator, args: Args, frame_renderer: *FrameRenderer.Shared
             frame_renderer.swapFrame(new_img);
             c.gui_notify_update(gui);
         }
+
+        app_state.setSnapshot(.{
+            .paused = player_state.isPaused(),
+        });
 
         std.time.sleep(10_000_000);
     }
@@ -234,7 +271,14 @@ pub fn main() !void {
     var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
     var should_quit = std.atomic.Value(bool).init(false);
 
-    const gui = c.gui_init();
+    var app_state = AppState{
+        .mutex = .{},
+        .inner = .{
+            .paused = false,
+        },
+    };
+
+    const gui = c.gui_init(&app_state);
     defer c.gui_free(gui);
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{
@@ -243,6 +287,7 @@ pub fn main() !void {
         &frame_renderer_shared,
         &should_quit,
         gui,
+        &app_state,
     });
 
     c.gui_run(gui, &frame_renderer);

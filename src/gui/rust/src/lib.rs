@@ -1,6 +1,12 @@
 use eframe::{egui, egui_glow, glow};
 
-use std::{ffi::c_void, sync::Mutex};
+use std::{
+    ffi::c_void,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Mutex,
+    },
+};
 
 mod c_bindings;
 mod gl_exports;
@@ -12,15 +18,29 @@ unsafe impl Sync for RendererPtr {}
 
 pub struct GuiInner {
     ctx: Option<egui::Context>,
+    action_rx: Receiver<c_bindings::GuiAction>,
+    action_tx: Sender<c_bindings::GuiAction>,
 }
 
-pub type Gui = Mutex<GuiInner>;
+pub struct Gui {
+    inner: Mutex<GuiInner>,
+    state: *mut c_bindings::AppState,
+}
 
 #[no_mangle]
-pub extern "C" fn gui_init() -> *mut Gui {
-    let inner = GuiInner { ctx: None };
+pub extern "C" fn gui_init(state: *mut c_bindings::AppState) -> *mut Gui {
+    let (action_tx, action_rx) = mpsc::channel();
 
-    let gui = Mutex::new(inner);
+    let inner = GuiInner {
+        ctx: None,
+        action_tx,
+        action_rx,
+    };
+
+    let gui = Gui {
+        inner: Mutex::new(inner),
+        state,
+    };
 
     Box::leak(Box::new(gui))
 }
@@ -43,22 +63,33 @@ pub extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
 
     let renderer = RendererPtr(renderer);
     eframe::run_native(
-        "Custom 3D painting in eframe using glow",
+        "video editor",
         options,
         Box::new(move |cc| {
-            unsafe {
-                let mut inner = (*gui).lock().unwrap();
+            let action_tx = unsafe {
+                let mut inner = (*gui).inner.lock().unwrap();
                 inner.ctx = Some(cc.egui_ctx.clone());
+                inner.action_tx.clone()
             };
-            Box::new(EframeImpl::new(cc, renderer))
+            Box::new(EframeImpl::new(cc, renderer, gui, action_tx))
         }),
     )
     .unwrap();
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gui_next_action(gui: *mut Gui) -> c_bindings::GuiAction {
+    let inner = (*gui).inner.lock().unwrap();
+    if let Ok(v) = inner.action_rx.try_recv() {
+        return v;
+    }
+
+    c_bindings::GuiAction_gui_action_none
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gui_notify_update(gui: *mut Gui) {
-    let gui = (*gui).lock().unwrap();
+    let gui = (*gui).inner.lock().unwrap();
     if let Some(ctx) = &gui.ctx {
         ctx.request_repaint();
     }
@@ -66,10 +97,17 @@ pub unsafe extern "C" fn gui_notify_update(gui: *mut Gui) {
 
 struct EframeImpl {
     renderer: RendererPtr,
+    action_tx: Sender<c_bindings::GuiAction>,
+    gui: *mut Gui,
 }
 
 impl EframeImpl {
-    fn new(cc: &eframe::CreationContext<'_>, renderer: RendererPtr) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        renderer: RendererPtr,
+        gui: *mut Gui,
+        action_tx: Sender<c_bindings::GuiAction>,
+    ) -> Self {
         let gl = cc
             .gl
             .as_ref()
@@ -79,7 +117,11 @@ impl EframeImpl {
             let userdata: *const glow::Context = &**gl;
             c_bindings::framerenderer_init_gl(renderer.0, userdata as *mut c_void);
         }
-        Self { renderer }
+        Self {
+            renderer,
+            action_tx,
+            gui,
+        }
     }
 }
 
@@ -87,8 +129,36 @@ impl eframe::App for EframeImpl {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut frame = egui::Frame::central_panel(&ctx.style());
         frame.inner_margin = egui::Margin::same(0.0);
+        egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
+            let state = unsafe { c_bindings::appstate_snapshot((*self.gui).state) };
+
+            let button_text = if state.paused { "play" } else { "pause" };
+
+            if ui.button(button_text).clicked() {
+                self.action_tx
+                    .send(c_bindings::GuiAction_gui_action_toggle_pause)
+                    .expect("failed to send action from gui");
+            };
+        });
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let rect = ui.max_rect();
+
+            ui.input(|input| {
+                for event in &input.events {
+                    match event {
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            ..
+                        } => {
+                            self.action_tx
+                                .send(c_bindings::GuiAction_gui_action_toggle_pause)
+                                .expect("failed to send action from gui");
+                        }
+                        _ => (),
+                    }
+                }
+            });
 
             let renderer = self.renderer.clone();
 
