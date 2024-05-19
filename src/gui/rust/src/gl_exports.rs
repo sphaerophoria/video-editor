@@ -33,7 +33,15 @@ unsafe extern "C" fn guigl_shader_source(
 
 #[no_mangle]
 unsafe extern "C" fn guigl_compile_shader(context: *const glow::Context, shader: GLuint) {
-    (*context).compile_shader(glow::NativeShader(shader.try_into().unwrap()));
+    let shader = glow::NativeShader(shader.try_into().unwrap());
+    (*context).compile_shader(shader);
+
+    if !(*context).get_shader_compile_status(shader) {
+        println!(
+            "shader compilation failed: {}",
+            (*context).get_shader_info_log(shader)
+        );
+    }
 }
 
 #[no_mangle]
@@ -196,4 +204,92 @@ unsafe extern "C" fn guigl_tex_image_2d(
 #[no_mangle]
 unsafe extern "C" fn guigl_use_program(context: *const glow::Context, program: GLuint) {
     (*context).use_program(Some(glow::NativeProgram(program.try_into().unwrap())));
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_clear_color(
+    context: *const glow::Context,
+    r: GLfloat,
+    g: GLfloat,
+    b: GLfloat,
+    a: GLfloat,
+) {
+    (*context).clear_color(r, g, b, a);
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_line_width(context: *const glow::Context, width: GLfloat) {
+    (*context).line_width(width);
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_clear(context: *const glow::Context, mask: GLbitfield) {
+    (*context).clear(mask);
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_create_buffer(context: *const glow::Context) -> GLuint {
+    (*context).create_buffer().unwrap().0.into()
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_delete_buffer(context: *const glow::Context, buf_id: GLuint) {
+    (*context).delete_buffer(glow::NativeBuffer(buf_id.try_into().unwrap()));
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_bind_buffer(
+    context: *const glow::Context,
+    target: GLenum,
+    buf_id: GLuint,
+) {
+    (*context).bind_buffer(target, Some(glow::NativeBuffer(buf_id.try_into().unwrap())));
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_buffer_data(
+    context: *const glow::Context,
+    target: GLenum,
+    size: GLsizeiptr,
+    data: *const c_void,
+    usage: GLenum,
+) {
+    let data = std::slice::from_raw_parts(data as *const u8, size as usize);
+    (*context).buffer_data_u8_slice(target, data, usage)
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_create_vertex_array(context: *const glow::Context) -> GLuint {
+    (*context).create_vertex_array().unwrap().0.into()
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_delete_vertex_array(context: *const glow::Context, array_id: GLuint) {
+    (*context).delete_vertex_array(glow::NativeVertexArray(array_id.try_into().unwrap()));
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_bind_vertex_array(context: *const glow::Context, array_id: GLuint) {
+    (*context).bind_vertex_array(Some(glow::NativeVertexArray(array_id.try_into().unwrap())));
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_vertex_attrib_pointer(
+    context: *const glow::Context,
+    index: GLuint,
+    size: GLint,
+    typ: GLenum,
+    norm: GLboolean,
+    stride: GLsizei,
+    p: *const c_void,
+) {
+    (*context).vertex_attrib_pointer_f32(index, size, typ, norm > 0, stride, p as i32);
+}
+
+#[no_mangle]
+unsafe extern "C" fn guigl_enable_vertex_attrib_array(
+    context: *const glow::Context,
+    index: GLuint,
+) {
+    (*context).enable_vertex_attrib_array(index);
 }

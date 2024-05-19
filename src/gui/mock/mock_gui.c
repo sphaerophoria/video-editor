@@ -142,6 +142,59 @@ void guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count) {
   (void)count;
 }
 
+void guigl_line_width(GuiGl* guigl, GLfloat width) {
+  (void)guigl;
+  (void)width;
+}
+
+GLuint guigl_create_buffer(GuiGl* guigl) { return impl_alloc(guigl); }
+
+void guigl_delete_buffer(GuiGl* guigl, GLuint buffer_id) {
+  impl_free(guigl, buffer_id);
+}
+
+void guigl_bind_buffer(GuiGl* guigl, GLenum target, GLuint buffer_id) {
+  (void)guigl;
+  (void)target;
+  (void)buffer_id;
+}
+void guigl_buffer_data(GuiGl* guigl, GLenum target, GLsizeiptr size,
+                       void const* data, GLenum usage) {
+  (void)guigl;
+  (void)target;
+  (void)size;
+  (void)data;
+  (void)usage;
+}
+
+GLuint guigl_create_vertex_array(GuiGl* guigl) { return impl_alloc(guigl); }
+
+void guigl_delete_vertex_array(GuiGl* guigl, GLuint array_id) {
+  impl_free(guigl, array_id);
+}
+
+void guigl_bind_vertex_array(GuiGl* guigl, GLuint array_id) {
+  (void)guigl;
+  (void)array_id;
+}
+
+void guigl_vertex_attrib_pointer(GuiGl* guigl, GLuint index, GLint size,
+                                 GLenum type, GLboolean normalized,
+                                 GLsizei stride, void const* pointer) {
+  (void)guigl;
+  (void)index;
+  (void)size;
+  (void)type;
+  (void)normalized;
+  (void)stride;
+  (void)pointer;
+}
+
+void guigl_enable_vertex_attrib_array(GuiGl* guigl, GLuint index) {
+  (void)guigl;
+  (void)index;
+}
+
 // GUI interface
 Gui* gui_init(AppState* state) {
   (void)state;
@@ -156,11 +209,14 @@ Gui* gui_init(AppState* state) {
 
 void gui_free(Gui* gui) { free(gui); }
 
-void gui_run(Gui* gui, Renderer* renderer) {
+void gui_run(Gui* gui, FrameRenderer* frame_renderer,
+             AudioRenderer* audio_renderer) {
   struct GuiImpl* impl = gui;
-  framerenderer_init_gl(renderer, gui);
+  framerenderer_init_gl(frame_renderer, gui);
+  audiorenderer_init_gl(audio_renderer, gui);
   for (int i = 0; i < 60 * 3; ++i) {
-    framerenderer_render(renderer, 800.0, 600.0, gui);
+    framerenderer_render(frame_renderer, 800.0, 600.0, gui);
+    audiorenderer_render(audio_renderer, gui, 1.0, 0.5);
     if (i % 60 == 15) {
       pthread_mutex_lock(&impl->state_mutex);
       impl->state = kGuiStateSeek;
@@ -175,7 +231,8 @@ void gui_run(Gui* gui, Renderer* renderer) {
     // 60fps
     usleep(16666);
   }
-  framerenderer_deinit_gl(renderer, gui);
+  audiorenderer_deinit_gl(audio_renderer, gui);
+  framerenderer_deinit_gl(frame_renderer, gui);
 
   pthread_mutex_lock(&impl->state_mutex);
   impl->state = kGuiStateFinished;

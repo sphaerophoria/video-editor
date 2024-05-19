@@ -78,15 +78,20 @@ pub unsafe extern "C" fn gui_free(gui: *mut Gui) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
+pub unsafe extern "C" fn gui_run(
+    gui: *mut Gui,
+    frame_renderer: *mut c_bindings::FrameRenderer,
+    audio_renderer: *mut c_bindings::AudioRenderer,
+) {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([350.0, 380.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
         multisampling: 4,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
-    let renderer = RendererPtr(renderer);
+    let frame_renderer = RendererPtr(frame_renderer);
+    let audio_renderer = RendererPtr(audio_renderer);
     eframe::run_native(
         "video editor",
         options,
@@ -95,7 +100,13 @@ pub unsafe extern "C" fn gui_run(gui: *mut Gui, renderer: *mut c_void) {
             inner.ctx = Some(cc.egui_ctx.clone());
             (*gui).cond.notify_all();
             let action_tx = inner.action_tx.clone();
-            Box::new(EframeImpl::new(cc, renderer, gui, action_tx))
+            Box::new(EframeImpl::new(
+                cc,
+                frame_renderer,
+                audio_renderer,
+                gui,
+                action_tx,
+            ))
         }),
     )
     .unwrap();
@@ -139,81 +150,196 @@ pub unsafe extern "C" fn gui_close(gui: *mut Gui) {
     }
 }
 
+/// Conversions between "rect" space, which is the position in the window in pixels, and "audio"
+/// space, which is the normalized position in the un-zoomed audio widget.
+struct AudioWidgetPosConverter<'a> {
+    zoom: &'a f32,
+    widget_center_norm: &'a f32,
+    rect: &'a egui::Rect,
+}
+
+impl AudioWidgetPosConverter<'_> {
+    fn audio_to_rect(&self, audio_pos_norm: f32) -> f32 {
+        let progress_norm_adjusted = (audio_pos_norm - self.widget_center_norm) * self.zoom + 0.5;
+        progress_norm_adjusted * self.rect.width() + self.rect.left()
+    }
+
+    fn rect_to_audio(&self, x_pos_rect: f32) -> f32 {
+        let rect_pos_norm = (x_pos_rect - self.rect.left()) / self.rect.width();
+        (rect_pos_norm - 0.5) / self.zoom + self.widget_center_norm
+    }
+}
+
 struct ProgressBar {
-    slider_held: bool,
     paused_on_click: bool,
+    zoom: f32,
+    widget_center_norm: f32,
 }
 
 impl ProgressBar {
-    fn state_transitioned(&self, pointer_down: bool) -> bool {
-        self.slider_held != pointer_down
-    }
-
-    fn requires_pauses_toggle(&self, currently_paused: bool) -> bool {
-        if self.slider_held && !currently_paused {
-            return true;
-        }
-
-        if !self.slider_held && currently_paused != self.paused_on_click {
-            return true;
-        }
-
-        false
-    }
-
-    fn handle_response(
+    fn handle_seek(
         &mut self,
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
     ) {
-        if response.changed() {
+        let primary_down = response.dragged_by(egui::PointerButton::Primary);
+        if primary_down {
+            let pos = response
+                .interact_pointer_pos()
+                .expect("Pointer should interact if dragging");
+            let converter = AudioWidgetPosConverter {
+                zoom: &self.zoom,
+                widget_center_norm: &self.widget_center_norm,
+                rect: &response.rect,
+            };
+
+            let audio_pos_norm = converter.rect_to_audio(pos.x);
             action_tx
-                .send(gui_actions::seek(state.current_position))
+                .send(gui_actions::seek(audio_pos_norm * state.total_runtime))
                 .unwrap();
         }
 
-        let pointer_down = response.is_pointer_button_down_on();
-        if !self.state_transitioned(pointer_down) {
-            return;
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            self.paused_on_click = state.paused;
+            if !state.paused {
+                action_tx.send(gui_actions::TOGGLE_PAUSE).unwrap();
+            }
         }
-        self.slider_held = pointer_down;
 
-        if self.requires_pauses_toggle(state.paused) {
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            && state.paused != self.paused_on_click
+        {
             action_tx.send(gui_actions::TOGGLE_PAUSE).unwrap();
         }
+    }
 
-        if pointer_down {
-            self.paused_on_click = state.paused;
+    fn handle_pan(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let x_delta = ui.input(|i| i.pointer.delta().x);
+            self.widget_center_norm -= x_delta / response.rect.width() / self.zoom;
+            self.widget_center_norm = self.widget_center_norm.clamp(0.0, 1.0);
         }
+    }
+
+    fn handle_zoom(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if response.contains_pointer() {
+            // If for whatever reason we cannot find the pointer pos, just use the middle of the
+            // widget
+            let mut pointer_pos_audio = 0.5;
+            if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                // NOTE: We want to zoom so that the mouse stays in the same spot. This means that the
+                // distance from the center to the pointer needs to stay the same
+                let converter = AudioWidgetPosConverter {
+                    zoom: &self.zoom,
+                    widget_center_norm: &self.widget_center_norm,
+                    rect: &response.rect,
+                };
+                pointer_pos_audio = converter.rect_to_audio(pointer_pos.x);
+            }
+
+            let old_zoom = self.zoom;
+            let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
+
+            // lol I don't know, it feels good to me
+            const SCROLL_FACTOR: f32 = 3.0;
+            self.zoom *= 1.001_f32.powf(scroll_delta * SCROLL_FACTOR);
+            self.zoom = self.zoom.max(1.0);
+
+            // In order to zoom "at the mouse", we have to ensure that mouse position does not
+            // change in either audio space OR rect space.
+            // We can calculate how far the point moved from the center in audio space, and then
+            // just adjust to keep that at the same point in rect space
+            let dist_from_center = pointer_pos_audio - self.widget_center_norm;
+            let new_dist_from_center = old_zoom / self.zoom * dist_from_center;
+            self.widget_center_norm += dist_from_center - new_dist_from_center;
+        }
+    }
+
+    fn clamp_widget_center(&mut self) {
+        let min = 0.5 / self.zoom;
+        let max = 1.0 - min;
+        self.widget_center_norm = self.widget_center_norm.clamp(min, max);
+    }
+
+    fn handle_response(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        state: &c_bindings::AppStateSnapshot,
+        action_tx: &Sender<c_bindings::GuiAction>,
+    ) {
+        self.handle_seek(response, state, action_tx);
+        self.handle_pan(ui, response);
+        self.handle_zoom(ui, response);
+        self.clamp_widget_center();
     }
 
     fn show(
         &mut self,
         ui: &mut egui::Ui,
-        mut state: c_bindings::AppStateSnapshot,
+        state: c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
+        audio_renderer: RendererPtr,
     ) {
         let response = ui
             .with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
-                ui.label(format!(
-                    "{:.02}/{:.02}",
-                    state.current_position, state.total_runtime
-                ));
-                ui.spacing_mut().slider_width = ui.available_width();
-                ui.add(
-                    egui::Slider::new(&mut state.current_position, 0.0..=state.total_runtime)
-                        .smart_aim(false)
-                        .show_value(false),
-                )
+                let response = ui.allocate_response(
+                    egui::vec2(ui.available_width(), 60.0),
+                    egui::Sense {
+                        click: false,
+                        drag: true,
+                        focusable: false,
+                    },
+                );
+
+                let rect = response.rect;
+                let zoom = self.zoom;
+                let center_norm = self.widget_center_norm;
+                let callback = egui::PaintCallback {
+                    rect,
+                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                        move |_info, painter| {
+                            let audio_renderer = &audio_renderer;
+                            unsafe {
+                                let userdata: *const glow::Context = &**painter.gl();
+                                c_bindings::audiorenderer_render(
+                                    audio_renderer.0,
+                                    userdata as *mut c_void,
+                                    zoom,
+                                    center_norm,
+                                );
+                            }
+                        },
+                    )),
+                };
+                ui.painter().add(callback);
+
+                let converter = AudioWidgetPosConverter {
+                    zoom: &self.zoom,
+                    widget_center_norm: &self.widget_center_norm,
+                    rect: &rect,
+                };
+
+                let progress_rect_cx =
+                    converter.audio_to_rect(state.current_position / state.total_runtime);
+                let mut progress_rect = rect;
+                progress_rect.set_width(2.0);
+                progress_rect.set_center(egui::pos2(progress_rect_cx, progress_rect.center().y));
+
+                ui.painter()
+                    .rect_filled(progress_rect, 0.0, egui::Color32::YELLOW);
+
+                response
             })
             .inner;
 
-        self.handle_response(&response, &state, action_tx);
+        self.handle_response(ui, &response, &state, action_tx);
     }
 }
 struct EframeImpl {
-    renderer: RendererPtr,
+    frame_renderer: RendererPtr,
+    audio_renderer: RendererPtr,
     action_tx: Sender<c_bindings::GuiAction>,
     gui: *mut Gui,
     progress_bar: ProgressBar,
@@ -222,7 +348,8 @@ struct EframeImpl {
 impl EframeImpl {
     fn new(
         cc: &eframe::CreationContext<'_>,
-        renderer: RendererPtr,
+        frame_renderer: RendererPtr,
+        audio_renderer: RendererPtr,
         gui: *mut Gui,
         action_tx: Sender<c_bindings::GuiAction>,
     ) -> Self {
@@ -233,15 +360,18 @@ impl EframeImpl {
 
         unsafe {
             let userdata: *const glow::Context = &**gl;
-            c_bindings::framerenderer_init_gl(renderer.0, userdata as *mut c_void);
+            c_bindings::framerenderer_init_gl(frame_renderer.0, userdata as *mut c_void);
+            c_bindings::audiorenderer_init_gl(audio_renderer.0, userdata as *mut c_void);
         }
         Self {
-            renderer,
+            frame_renderer,
+            audio_renderer,
             action_tx,
             gui,
             progress_bar: ProgressBar {
-                slider_held: false,
                 paused_on_click: false,
+                zoom: 1.0,
+                widget_center_norm: 0.5,
             },
         }
     }
@@ -263,12 +393,17 @@ impl eframe::App for EframeImpl {
                         .expect("failed to send action from gui");
                 };
 
-                self.progress_bar.show(ui, state, &self.action_tx);
+                ui.label(format!(
+                    "{:.02}/{:.02}",
+                    state.current_position, state.total_runtime
+                ));
+                ui.spacing_mut().slider_width = ui.available_width();
             });
+
+            self.progress_bar
+                .show(ui, state, &self.action_tx, self.audio_renderer.clone());
         });
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            let rect = ui.max_rect();
-
             ui.input(|input| {
                 for event in &input.events {
                     if let egui::Event::Key {
@@ -284,16 +419,17 @@ impl eframe::App for EframeImpl {
                 }
             });
 
-            let renderer = self.renderer.clone();
+            let frame_renderer = self.frame_renderer.clone();
 
+            let rect = ui.max_rect();
             let callback = egui::PaintCallback {
                 rect,
                 callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                    let renderer = &renderer;
+                    let frame_renderer = &frame_renderer;
                     unsafe {
                         let userdata: *const glow::Context = &**painter.gl();
                         c_bindings::framerenderer_render(
-                            renderer.0,
+                            frame_renderer.0,
                             rect.width(),
                             rect.height(),
                             userdata as *mut c_void,
@@ -309,7 +445,8 @@ impl eframe::App for EframeImpl {
         unsafe {
             let gl = gl.unwrap();
             let userdata: *const glow::Context = gl;
-            c_bindings::framerenderer_deinit_gl(self.renderer.0, userdata as *mut c_void);
+            c_bindings::framerenderer_deinit_gl(self.frame_renderer.0, userdata as *mut c_void);
+            c_bindings::audiorenderer_deinit_gl(self.audio_renderer.0, userdata as *mut c_void);
             (*self.gui).inner.lock().unwrap().ctx = None;
         }
     }

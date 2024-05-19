@@ -6,6 +6,7 @@ const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
 const App = @import("App.zig");
+const AudioRenderer = @import("AudioRenderer.zig");
 
 const ArgParseError = std.process.ArgIterator.InitError;
 
@@ -134,6 +135,9 @@ pub fn main() !void {
     var dec = try decoder.VideoDecoder.init(alloc, args.input);
     defer dec.deinit();
 
+    var audio_renderer = try AudioRenderer.init(alloc, args.input);
+    defer audio_renderer.deinit();
+
     var frame_renderer_shared = FrameRenderer.SharedData{};
     defer frame_renderer_shared.deinit();
 
@@ -157,6 +161,6 @@ pub fn main() !void {
     };
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{app_refs});
-    c.gui_run(gui, &frame_renderer);
+    c.gui_run(gui, &frame_renderer, &audio_renderer);
     main_loop_thread.join();
 }

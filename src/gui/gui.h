@@ -4,7 +4,8 @@
 #include <GL/gl.h>
 #include <stdbool.h>
 
-typedef void Renderer;
+typedef void FrameRenderer;
+typedef void AudioRenderer;
 typedef void GuiGl;
 typedef void Gui;
 typedef void AppState;
@@ -30,7 +31,7 @@ struct AppStateSnapshot {
 // GUI interface
 Gui* gui_init(AppState* state);
 void gui_free(Gui* gui);
-void gui_run(Gui* gui, Renderer* renderer);
+void gui_run(Gui* gui, FrameRenderer* frame_renderer, AudioRenderer* audio_renderer);
 struct GuiAction gui_next_action(Gui* gui);
 void gui_wait_start(Gui* gui);
 void gui_notify_update(Gui* gui);
@@ -59,11 +60,28 @@ void   guigl_uniform_1i(GuiGl* guigl, GLint loc, GLint val);
 void   guigl_uniform_1f(GuiGl* guigl, GLint loc, GLfloat val);
 GLint  guigl_get_uniform_location(GuiGl* guigl, GLuint program, const GLchar * name);
 void   guigl_draw_arrays(GuiGl* guigl, GLenum mode, GLint first, GLsizei count);
+void   guigl_clear_color(GuiGl* guigl, GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+void   guigl_clear(GuiGl* guigl, GLbitfield mask);
+void   guigl_line_width(GuiGl* guigl, GLfloat width);
+
+GLuint guigl_create_buffer(GuiGl* guigl);
+void   guigl_delete_buffer(GuiGl* guigl, GLuint buffer_id);
+void   guigl_bind_buffer(GuiGl* guigl, GLenum target, GLuint buffer_id);
+void   guigl_buffer_data(GuiGl* guigl, GLenum target, GLsizeiptr size, const void * data, GLenum usage);
+GLuint guigl_create_vertex_array(GuiGl* guigl);
+void   guigl_delete_vertex_array(GuiGl* guigl, GLuint array_id);
+void   guigl_bind_vertex_array(GuiGl* guigl, GLuint array_id);
+void   guigl_vertex_attrib_pointer(GuiGl* guigl, GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void * pointer);
+void   guigl_enable_vertex_attrib_array(GuiGl* guigl, GLuint index);
 
 // Zig interface
-void framerenderer_init_gl(Renderer* renderer, GuiGl* guigl);
-void framerenderer_render(Renderer* renderer, float width, float height, GuiGl* guigl);
-void framerenderer_deinit_gl(Renderer* renderer, GuiGl* guigl);
+void framerenderer_init_gl(FrameRenderer* renderer, GuiGl* guigl);
+void framerenderer_render(FrameRenderer* renderer, float width, float height, GuiGl* guigl);
+void framerenderer_deinit_gl(FrameRenderer* renderer, GuiGl* guigl);
+
+void audiorenderer_init_gl(AudioRenderer* renderer, GuiGl* guigl);
+void audiorenderer_render(AudioRenderer* renderer, GuiGl* guigl, float zoom, float center_norm);
+void audiorenderer_deinit_gl(AudioRenderer* renderer, GuiGl* guigl);
 
 struct AppStateSnapshot appstate_snapshot(AppState* app);
 
