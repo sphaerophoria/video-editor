@@ -9,10 +9,16 @@ typedef void GuiGl;
 typedef void Gui;
 typedef void AppState;
 
-enum GuiAction {
+enum GuiActionTag {
+    gui_action_none,
     gui_action_toggle_pause,
     gui_action_close,
-    gui_action_none,
+    gui_action_seek,
+};
+
+struct GuiAction {
+    enum GuiActionTag tag;
+    float seek_position;
 };
 
 struct AppStateSnapshot {
@@ -25,7 +31,7 @@ struct AppStateSnapshot {
 Gui* gui_init(AppState* state);
 void gui_free(Gui* gui);
 void gui_run(Gui* gui, Renderer* renderer);
-enum GuiAction gui_next_action(Gui* gui);
+struct GuiAction gui_next_action(Gui* gui);
 void gui_wait_start(Gui* gui);
 void gui_notify_update(Gui* gui);
 void gui_close(Gui* gui);

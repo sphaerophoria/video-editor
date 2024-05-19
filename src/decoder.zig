@@ -170,6 +170,7 @@ const VideoDecoderError = error{
     InvalidData,
     OutOfMemory,
     InternalError,
+    InvalidArg,
 };
 
 pub const VideoDecoder = struct {
@@ -298,6 +299,15 @@ pub const VideoDecoder = struct {
         c.avformat_free_context(self.fmt_ctx);
     }
 
+    pub fn seek(self: *VideoDecoder, pts: f32, stream_id: usize) VideoDecoderError!void {
+        const time_base = self.fmt_ctx.streams[stream_id].*.time_base;
+        const pts_tb = secondsToTimeBase(pts, time_base);
+        if (c.av_seek_frame(self.fmt_ctx, @intCast(stream_id), pts_tb, c.AVSEEK_FLAG_BACKWARD) < 0) {
+            std.log.err("Failed to seek to {d}", .{pts});
+            return VideoDecoderError.InvalidArg;
+        }
+    }
+
     pub fn duration(self: *VideoDecoder) f32 {
         if (self.fmt_ctx.nb_streams < 1) {
             return 0.0;
@@ -305,7 +315,7 @@ pub const VideoDecoder = struct {
 
         const stream_id = 0;
         const stream = self.fmt_ctx.streams[stream_id].*;
-        return applyTimeBase(stream.duration, stream.time_base);
+        return timeBaseToSeconds(stream.duration, stream.time_base);
     }
 
     pub fn handleVideoFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!Frame {
@@ -338,7 +348,7 @@ pub const VideoDecoder = struct {
         const v = frame.data[2][0 .. y.len / 4];
 
         const time_base = self.fmt_ctx.streams[@intCast(self.packet.stream_index)].*.time_base;
-        const pts = applyTimeBase(frame.pts, time_base);
+        const pts = timeBaseToSeconds(frame.pts, time_base);
 
         return .{ .video = .{
             .stream_id = @intCast(self.packet.stream_index),
@@ -489,9 +499,16 @@ fn ffmpegFormatToAudioFormat(format: c_int) VideoDecoderError!audio.Format {
     }
 }
 
-fn applyTimeBase(val_i: i64, time_base: c.AVRational) f32 {
+fn timeBaseToSeconds(val_i: i64, time_base: c.AVRational) f32 {
     var val_f: f32 = @floatFromInt(val_i);
     val_f *= @floatFromInt(time_base.num);
     val_f /= @floatFromInt(time_base.den);
     return val_f;
+}
+
+fn secondsToTimeBase(val_s: f32, time_base: c.AVRational) i64 {
+    var val_tb = val_s;
+    val_tb *= @floatFromInt(time_base.den);
+    val_tb /= @floatFromInt(time_base.num);
+    return @intFromFloat(val_tb);
 }

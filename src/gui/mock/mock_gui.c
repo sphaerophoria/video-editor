@@ -9,6 +9,7 @@
 enum GuiState {
   kGuiStateFinished,
   kGuiStateTogglePause,
+  kGuiStateSeek,
   kGuiStateNormal,
 };
 
@@ -16,6 +17,7 @@ enum GuiState {
 struct GuiImpl {
   pthread_mutex_t state_mutex;
   enum GuiState state;
+  float seek_pos;
   unsigned int allocation_id;
   void* allocations[MAX_ALLOCATIONS];
 };
@@ -159,7 +161,13 @@ void gui_run(Gui* gui, Renderer* renderer) {
   framerenderer_init_gl(renderer, gui);
   for (int i = 0; i < 60 * 3; ++i) {
     framerenderer_render(renderer, 800.0, 600.0, gui);
-    if (i % 30 == 0) {
+    if (i % 60 == 15) {
+      pthread_mutex_lock(&impl->state_mutex);
+      impl->state = kGuiStateSeek;
+      // Looking for some combo of seeking both forwards and backwards
+      impl->seek_pos = i % 13;
+      pthread_mutex_unlock(&impl->state_mutex);
+    } else if (i % 30 == 0) {
       pthread_mutex_lock(&impl->state_mutex);
       impl->state = kGuiStateTogglePause;
       pthread_mutex_unlock(&impl->state_mutex);
@@ -174,23 +182,29 @@ void gui_run(Gui* gui, Renderer* renderer) {
   pthread_mutex_unlock(&impl->state_mutex);
 }
 
-enum GuiAction gui_next_action(Gui* gui) {
+struct GuiAction gui_next_action(Gui* gui) {
   struct GuiImpl* impl = gui;
   pthread_mutex_lock(&impl->state_mutex);
-  enum GuiAction ret = gui_action_close;
+  struct GuiAction ret = {0};
 
   switch (impl->state) {
     case kGuiStateNormal: {
-      ret = gui_action_none;
+      ret.tag = gui_action_none;
       break;
     }
     case kGuiStateTogglePause: {
       impl->state = kGuiStateNormal;
-      ret = gui_action_toggle_pause;
+      ret.tag = gui_action_toggle_pause;
+      break;
+    }
+    case kGuiStateSeek: {
+      impl->state = kGuiStateNormal;
+      ret.tag = gui_action_seek;
+      ret.seek_position = impl->seek_pos;
       break;
     }
     case kGuiStateFinished: {
-      ret = gui_action_close;
+      ret.tag = gui_action_close;
       break;
     }
     default: {

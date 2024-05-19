@@ -15,13 +15,13 @@ pub export fn appstate_snapshot(state: *AppState) c.AppStateSnapshot {
 const PlayerState = struct {
     start_time: std.time.Instant,
     pause_time: ?std.time.Instant,
-    time_adjustment: u64,
+    time_adjustment_ns: i64,
 
     fn init(now: std.time.Instant) PlayerState {
         return .{
             .start_time = now,
             .pause_time = null,
-            .time_adjustment = 0,
+            .time_adjustment_ns = 0,
         };
     }
 
@@ -39,8 +39,17 @@ const PlayerState = struct {
             return;
         }
 
-        self.time_adjustment += now.since(self.pause_time.?);
+        self.time_adjustment_ns += @intCast(now.since(self.pause_time.?));
         self.pause_time = null;
+    }
+
+    fn seek(self: *PlayerState, now: std.time.Instant, pts: f32) void {
+        self.start_time = now;
+        const seek_pos_ns: i64 = @intFromFloat(pts * 1e9);
+        self.time_adjustment_ns = -seek_pos_ns;
+        if (self.pause_time) |_| {
+            self.pause_time = now;
+        }
     }
 
     fn isPaused(self: *const PlayerState) bool {
@@ -56,7 +65,10 @@ const PlayerState = struct {
     }
 
     fn shouldUpdateFrame(self: *const PlayerState, now: std.time.Instant, frame_pts: f32) bool {
-        return self.pause_time == null and frame_pts * 1e9 < @as(f32, @floatFromInt(now.since(self.start_time) - self.time_adjustment));
+        const time_since_start_ns: i64 = @intCast(now.since(self.start_time));
+        const time_since_start_adjusted: i64 = time_since_start_ns - self.time_adjustment_ns;
+        const frame_pts_ns: i64 = @intFromFloat(frame_pts * 1e9);
+        return self.pause_time == null and frame_pts_ns < time_since_start_adjusted;
     }
 };
 
@@ -200,6 +212,27 @@ fn makeAudioPlayer(alloc: Allocator, dec: *decoder.VideoDecoder) !?*audio.Player
     return audio_player;
 }
 
+fn applyFrameUpdate(
+    gui: ?*c.Gui,
+    frame_renderer: *FrameRenderer.SharedData,
+    dec: *decoder.VideoDecoder,
+    audio_player: ?*audio.Player,
+    stream_id: usize,
+) !f32 {
+    while (true) {
+        var new_img = try getNextVideoFrame(dec, audio_player);
+        if (stream_id != new_img.stream_id) {
+            std.log.warn("Ignoring frame from new video stream", .{});
+            new_img.deinit();
+            continue;
+        }
+
+        frame_renderer.swapFrame(new_img);
+        c.gui_notify_update(gui);
+        return new_img.pts;
+    }
+}
+
 fn main_loop(
     alloc: Allocator,
     frame_renderer: *FrameRenderer.SharedData,
@@ -229,9 +262,10 @@ fn main_loop(
     while (true) {
         const now = try std.time.Instant.now();
 
+        var seek_position: ?f32 = null;
         while (true) {
             const action = c.gui_next_action(gui);
-            switch (action) {
+            switch (action.tag) {
                 c.gui_action_toggle_pause => {
                     player_state.togglePause(now);
                     c.gui_notify_update(gui);
@@ -242,23 +276,35 @@ fn main_loop(
                 c.gui_action_close => {
                     return;
                 },
+                c.gui_action_seek => {
+                    seek_position = action.seek_position;
+                },
                 else => {
-                    std.debug.panic("invalid action: {d}", .{action});
+                    std.debug.panic("invalid action: {d}", .{action.tag});
                 },
             }
         }
 
-        while (player_state.shouldUpdateFrame(now, last_pts)) {
-            var new_img = try getNextVideoFrame(dec, audio_player);
-            if (stream_id != new_img.stream_id) {
-                std.log.warn("Ignoring frame from new video stream", .{});
-                new_img.deinit();
-                continue;
-            }
+        if (seek_position) |s| {
+            try dec.seek(s, stream_id);
+            last_pts = try applyFrameUpdate(
+                gui,
+                frame_renderer,
+                dec,
+                null,
+                stream_id,
+            );
+            player_state.seek(now, last_pts);
+        }
 
-            last_pts = new_img.pts;
-            frame_renderer.swapFrame(new_img);
-            c.gui_notify_update(gui);
+        while (player_state.shouldUpdateFrame(now, last_pts)) {
+            last_pts = try applyFrameUpdate(
+                gui,
+                frame_renderer,
+                dec,
+                audio_player,
+                stream_id,
+            );
         }
 
         app_state.setSnapshot(.{
