@@ -154,7 +154,7 @@ const Args = struct {
     }
 };
 
-fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !decoder.VideoFrame {
+fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player, stream_id: ?usize) !decoder.VideoFrame {
     while (true) {
         var frame = try dec.next();
         if (frame == null) {
@@ -172,8 +172,17 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player) !
                     af.deinit();
                 }
             },
-            .video => |vf| {
-                return vf;
+            .video => |*vf| {
+                if (stream_id == null) {
+                    return vf.*;
+                }
+
+                if (stream_id != vf.stream_id) {
+                    std.log.warn("Ignoring frame from new video stream", .{});
+                    vf.deinit();
+                    continue;
+                }
+                return vf.*;
             },
         }
     }
@@ -212,27 +221,6 @@ fn makeAudioPlayer(alloc: Allocator, dec: *decoder.VideoDecoder) !?*audio.Player
     return audio_player;
 }
 
-fn applyFrameUpdate(
-    gui: ?*c.Gui,
-    frame_renderer: *FrameRenderer.SharedData,
-    dec: *decoder.VideoDecoder,
-    audio_player: ?*audio.Player,
-    stream_id: usize,
-) !f32 {
-    while (true) {
-        var new_img = try getNextVideoFrame(dec, audio_player);
-        if (stream_id != new_img.stream_id) {
-            std.log.warn("Ignoring frame from new video stream", .{});
-            new_img.deinit();
-            continue;
-        }
-
-        frame_renderer.swapFrame(new_img);
-        c.gui_notify_update(gui);
-        return new_img.pts;
-    }
-}
-
 fn main_loop(
     alloc: Allocator,
     frame_renderer: *FrameRenderer.SharedData,
@@ -252,7 +240,7 @@ fn main_loop(
 
     var player_state = PlayerState.init(try std.time.Instant.now());
 
-    const img = try getNextVideoFrame(dec, audio_player);
+    const img = try getNextVideoFrame(dec, audio_player, null);
     var last_pts = img.pts;
     const stream_id = img.stream_id;
     frame_renderer.swapFrame(img);
@@ -287,24 +275,25 @@ fn main_loop(
 
         if (seek_position) |s| {
             try dec.seek(s, stream_id);
-            last_pts = try applyFrameUpdate(
-                gui,
-                frame_renderer,
-                dec,
-                null,
-                stream_id,
-            );
+            var new_img: decoder.VideoFrame = undefined;
+            while (true) {
+                new_img = try getNextVideoFrame(dec, null, stream_id);
+                last_pts = new_img.pts;
+
+                if (last_pts >= s) {
+                    break;
+                }
+            }
             player_state.seek(now, last_pts);
+            frame_renderer.swapFrame(new_img);
+            c.gui_notify_update(gui);
         }
 
         while (player_state.shouldUpdateFrame(now, last_pts)) {
-            last_pts = try applyFrameUpdate(
-                gui,
-                frame_renderer,
-                dec,
-                audio_player,
-                stream_id,
-            );
+            const new_img = try getNextVideoFrame(dec, audio_player, stream_id);
+            last_pts = new_img.pts;
+            frame_renderer.swapFrame(new_img);
+            c.gui_notify_update(gui);
         }
 
         app_state.setSnapshot(.{
