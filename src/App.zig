@@ -92,6 +92,7 @@ fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
         if (self.last_pts >= pts) {
             break;
         }
+        new_img.deinit();
     }
     self.player_state.seek(now, self.last_pts);
     self.refs.frame_renderer.swapFrame(new_img);
