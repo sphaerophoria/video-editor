@@ -85,28 +85,43 @@ fn applyGuiActions(self: *App, now: std.time.Instant) !bool {
     return false;
 }
 
+fn setEndOfVideo(self: *App, now: std.time.Instant) void {
+    self.player_state.pause(now);
+    self.last_pts = self.total_runtime;
+    c.gui_notify_update(self.refs.gui);
+}
+
 fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
     try self.refs.dec.seek(pts, self.stream_id);
-    var new_img: decoder.VideoFrame = undefined;
+
+    var img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
+        self.setEndOfVideo(now);
+        return;
+    };
+
     while (true) {
-        new_img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
+        const new_img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
+            self.setEndOfVideo(now);
             break;
         };
+        img.deinit();
+        img = new_img;
+
         self.last_pts = new_img.pts;
 
         if (self.last_pts >= pts) {
             break;
         }
-        new_img.deinit();
     }
     self.player_state.seek(now, self.last_pts);
-    self.refs.frame_renderer.swapFrame(new_img);
+    self.refs.frame_renderer.swapFrame(img);
     c.gui_notify_update(self.refs.gui);
 }
 
 fn updateVideoFrame(self: *App, now: std.time.Instant) !void {
     while (self.player_state.shouldUpdateFrame(now, self.last_pts)) {
         const new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id) orelse {
+            self.setEndOfVideo(now);
             break;
         };
         self.last_pts = new_img.pts;
