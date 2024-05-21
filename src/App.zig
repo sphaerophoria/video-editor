@@ -24,7 +24,10 @@ stream_id: usize,
 total_runtime: f32,
 
 pub fn init(refs: AppRefs) !App {
-    const img = try getNextVideoFrame(refs.dec, refs.audio_player, null);
+    const img = try getNextVideoFrame(refs.dec, refs.audio_player, null) orelse {
+        std.log.err("Video should have at least one frame", .{});
+        return error.InvalidData;
+    };
     refs.frame_renderer.swapFrame(img);
 
     return .{
@@ -86,7 +89,9 @@ fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
     try self.refs.dec.seek(pts, self.stream_id);
     var new_img: decoder.VideoFrame = undefined;
     while (true) {
-        new_img = try getNextVideoFrame(self.refs.dec, null, self.stream_id);
+        new_img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
+            break;
+        };
         self.last_pts = new_img.pts;
 
         if (self.last_pts >= pts) {
@@ -101,7 +106,9 @@ fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
 
 fn updateVideoFrame(self: *App, now: std.time.Instant) !void {
     while (self.player_state.shouldUpdateFrame(now, self.last_pts)) {
-        const new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id);
+        const new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id) orelse {
+            break;
+        };
         self.last_pts = new_img.pts;
         self.refs.frame_renderer.swapFrame(new_img);
         c.gui_notify_update(self.refs.gui);
@@ -229,11 +236,11 @@ const PlayerState = struct {
     }
 };
 
-fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player, stream_id: ?usize) !decoder.VideoFrame {
+fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player, stream_id: ?usize) !?decoder.VideoFrame {
     while (true) {
         var frame = try dec.next();
         if (frame == null) {
-            continue;
+            return null;
         }
 
         switch (frame.?) {

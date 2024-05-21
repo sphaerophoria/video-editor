@@ -171,6 +171,7 @@ const VideoDecoderError = error{
     OutOfMemory,
     InternalError,
     InvalidArg,
+    Eof,
 };
 
 pub const VideoDecoder = struct {
@@ -405,43 +406,49 @@ pub const VideoDecoder = struct {
     };
 
     fn readNextFrame(self: *VideoDecoder) VideoDecoderError!NextFrame {
-        c.av_packet_unref(self.packet);
-        if (c.av_read_frame(self.fmt_ctx, self.packet) < 0) {
-            std.log.err("failed to read frame", .{});
-            return error.InvalidData;
+        while (true) {
+            c.av_packet_unref(self.packet);
+            const av_read_frame_ret = c.av_read_frame(self.fmt_ctx, self.packet);
+            if (av_read_frame_ret == c.AVERROR_EOF) {
+                return VideoDecoderError.Eof;
+            }
+            if (av_read_frame_ret < 0) {
+                std.log.err("failed to read frame", .{});
+                return error.InvalidData;
+            }
+
+            if (self.packet.stream_index >= self.decoder_ctxs.items.len or self.packet.stream_index < 0) {
+                std.log.err("got frame for stream that does not exist", .{});
+                return VideoDecoderError.InvalidData;
+            }
+
+            const stream_index: usize = @intCast(self.packet.stream_index);
+            const decoder_ctx = self.decoder_ctxs.items[stream_index];
+
+            if (c.avcodec_send_packet(decoder_ctx, self.packet) < 0) {
+                std.log.err("failed to send packet to decoder", .{});
+                return VideoDecoderError.InvalidData;
+            }
+
+            const frame_id = try self.frame_pool.acquire();
+            errdefer self.frame_pool.release(frame_id);
+            const frame = self.frame_pool.pool.items[frame_id];
+
+            const ret = c.avcodec_receive_frame(decoder_ctx, frame);
+            if (ret == c.AVERROR(c.EAGAIN)) {
+                // This simplifies the error handling path, even though we could
+                // just directly try again
+                return VideoDecoderError.Again;
+            } else if (ret < 0) {
+                std.log.err("failed to turn packet into frame: {d}", .{ret});
+                return VideoDecoderError.InvalidData;
+            }
+
+            return .{
+                .frame_id = frame_id,
+                .stream_id = stream_index,
+            };
         }
-
-        if (self.packet.stream_index >= self.decoder_ctxs.items.len or self.packet.stream_index < 0) {
-            std.log.err("got frame for stream that does not exist", .{});
-            return VideoDecoderError.InvalidData;
-        }
-
-        const stream_index: usize = @intCast(self.packet.stream_index);
-        const decoder_ctx = self.decoder_ctxs.items[stream_index];
-
-        if (c.avcodec_send_packet(decoder_ctx, self.packet) < 0) {
-            std.log.err("failed to send packet to decoder", .{});
-            return VideoDecoderError.InvalidData;
-        }
-
-        const frame_id = try self.frame_pool.acquire();
-        errdefer self.frame_pool.release(frame_id);
-        const frame = self.frame_pool.pool.items[frame_id];
-
-        const ret = c.avcodec_receive_frame(decoder_ctx, frame);
-        if (ret == c.AVERROR(c.EAGAIN)) {
-            // This simplifies the error handling path, even though we could
-            // just directly try again
-            return VideoDecoderError.Again;
-        } else if (ret < 0) {
-            std.log.err("failed to turn packet into frame: {d}", .{ret});
-            return VideoDecoderError.InvalidData;
-        }
-
-        return .{
-            .frame_id = frame_id,
-            .stream_id = stream_index,
-        };
     }
 
     pub fn next(self: *VideoDecoder) VideoDecoderError!?Frame {
@@ -449,6 +456,8 @@ pub const VideoDecoder = struct {
             const next_frame = self.readNextFrame() catch |e| {
                 if (e == VideoDecoderError.Again) {
                     continue;
+                } else if (e == VideoDecoderError.Eof) {
+                    return null;
                 }
 
                 return e;
@@ -465,7 +474,8 @@ pub const VideoDecoder = struct {
                 },
                 else => {
                     std.log.warn("Unknown codec type: {d}", .{decoder_ctx.codec.*.type});
-                    return null;
+                    self.frame_pool.release(next_frame.frame_id);
+                    continue;
                 },
             }
         }
