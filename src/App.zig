@@ -21,7 +21,6 @@ refs: AppRefs,
 player_state: PlayerState,
 last_pts: f32,
 stream_id: usize,
-total_runtime: f32,
 
 pub fn init(refs: AppRefs) !App {
     const img = try getNextVideoFrame(refs.dec, refs.audio_player, null) orelse {
@@ -35,7 +34,6 @@ pub fn init(refs: AppRefs) !App {
         .player_state = PlayerState.init(try std.time.Instant.now()),
         .stream_id = img.stream_id,
         .last_pts = img.pts,
-        .total_runtime = refs.dec.duration(),
     };
 }
 
@@ -87,7 +85,7 @@ fn applyGuiActions(self: *App, now: std.time.Instant) !bool {
 
 fn setEndOfVideo(self: *App, now: std.time.Instant) void {
     self.player_state.pause(now);
-    self.last_pts = self.total_runtime;
+    self.last_pts = self.refs.dec.duration;
     c.gui_notify_update(self.refs.gui);
 }
 
@@ -134,7 +132,7 @@ fn updateAppState(self: *App) void {
     self.refs.app_state.setSnapshot(.{
         .paused = self.player_state.isPaused(),
         .current_position = self.last_pts,
-        .total_runtime = self.total_runtime,
+        .total_runtime = self.refs.dec.duration,
     });
 }
 
@@ -162,7 +160,6 @@ pub const AppState = struct {
             .inner = .{
                 .paused = false,
                 .current_position = 0.0,
-                .total_runtime = 0.0,
             },
         };
     }

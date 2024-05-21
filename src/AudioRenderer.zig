@@ -65,15 +65,14 @@ const InitThread = struct {
             return error.NoAudioStream;
         };
 
-        const runtime_s = dec.duration();
-        const window_size = calculateWindowSize(stream_info, runtime_s, target_memory_usage_bytes);
+        const window_size = calculateWindowSize(stream_info, dec.duration, target_memory_usage_bytes);
 
         // NOTE: This may be larger than the number of samples we actually
         // read. Without much root causing, the timeline lines up better if we
         // use the calculated value instead of the actual value. My intuition
         // here is that the audio frames can stop before the stream does, but I
         // have not verified
-        const num_samples: usize = @intFromFloat(@ceil(@as(f32, @floatFromInt(stream_info.sample_rate)) * runtime_s / @as(f32, @floatFromInt(window_size))));
+        const num_samples: usize = @intFromFloat(@ceil(@as(f32, @floatFromInt(stream_info.sample_rate)) * dec.duration / @as(f32, @floatFromInt(window_size))));
 
         {
             self.shared.mutex.lock();

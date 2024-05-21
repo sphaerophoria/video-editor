@@ -184,6 +184,7 @@ pub const VideoDecoder = struct {
     decoder_ctxs: std.ArrayList(*c.AVCodecContext),
     frame_pool: FramePool,
     packet: *c.AVPacket,
+    duration: f32,
 
     fn freeDecoderContexts(ctxs: *std.ArrayList(*c.AVCodecContext)) void {
         for (ctxs.items) |*ctx| {
@@ -280,12 +281,15 @@ pub const VideoDecoder = struct {
         var pkt = try makePacket();
         errdefer c.av_packet_free(@ptrCast(&pkt));
 
+        const duration = try detectDuration(fmt_ctx, pkt);
+
         return .{
             .alloc = alloc,
             .fmt_ctx = fmt_ctx,
             .decoder_ctxs = decoder_ctxs,
             .frame_pool = frame_pool,
             .packet = pkt,
+            .duration = duration,
         };
     }
 
@@ -311,16 +315,6 @@ pub const VideoDecoder = struct {
             std.log.err("Failed to seek to {d}", .{pts});
             return VideoDecoderError.InvalidArg;
         }
-    }
-
-    pub fn duration(self: *VideoDecoder) f32 {
-        if (self.fmt_ctx.nb_streams < 1) {
-            return 0.0;
-        }
-
-        const stream_id = 0;
-        const stream = self.fmt_ctx.streams[stream_id].*;
-        return timeBaseToSeconds(stream.duration, stream.time_base);
     }
 
     pub fn handleVideoFrame(self: *VideoDecoder, frame_id: usize) VideoDecoderError!Frame {
@@ -529,4 +523,28 @@ fn secondsToTimeBase(val_s: f32, time_base: c.AVRational) i64 {
     val_tb *= @floatFromInt(time_base.den);
     val_tb /= @floatFromInt(time_base.num);
     return @intFromFloat(val_tb);
+}
+
+fn detectDuration(fmt_ctx: *c.AVFormatContext, packet: *c.AVPacket) !f32 {
+    defer _ = c.av_seek_frame(fmt_ctx, 0, 0, 0);
+
+    var max_pts: f32 = 0.0;
+    if (c.av_seek_frame(fmt_ctx, 0, std.math.maxInt(i64), c.AVSEEK_FLAG_BACKWARD) < 0) {
+        std.log.err("Failed to seek to end of file", .{});
+        return VideoDecoderError.InternalError;
+    }
+
+    while (true) {
+        c.av_packet_unref(packet);
+        const av_read_frame_ret = c.av_read_frame(fmt_ctx, packet);
+        defer c.av_packet_unref(packet);
+        if (av_read_frame_ret == c.AVERROR_EOF) {
+            break;
+        }
+        const time_base = fmt_ctx.streams[@intCast(packet.stream_index)].*.time_base;
+        const pts = timeBaseToSeconds(packet.pts, time_base);
+        max_pts = @max(max_pts, pts);
+    }
+
+    return max_pts;
 }
