@@ -56,7 +56,7 @@ const InitThread = struct {
     fn run_and_consume(self: *InitThread) !void {
         defer self.deinit();
 
-        const target_memory_usage_bytes = 300 * 1024;
+        const target_memory_usage_bytes = 3 * 1024 * 1024;
         var dec = try decoder.VideoDecoder.init(self.alloc, self.path);
         defer dec.deinit();
 
