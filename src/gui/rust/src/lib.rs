@@ -208,7 +208,15 @@ impl ProgressBar {
         }
 
         if response.drag_stopped_by(egui::PointerButton::Primary)
-            && state.paused != self.paused_on_click
+            // You may think we should check the current state here, but that is untrue. When we
+            // execute a seek, we may not finish the seek before the next render frame in the UI.
+            // Because of this we may not see the applied pause yet. If we manage to check this
+            // condition before the pause is applied, we will not correctly unpause orselves.
+            //
+            // The failure condition here is if we somehow change the pause state while we are
+            // seeking (i.e. pressing spacebar), in this case we may end up with an extra toggle
+            // that we didn't want, but that's a fine tradeoff here
+            && !self.paused_on_click
         {
             action_tx.send(gui_actions::TOGGLE_PAUSE).unwrap();
         }
