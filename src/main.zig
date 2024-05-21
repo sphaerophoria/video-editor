@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const c = @import("c.zig");
@@ -127,7 +128,10 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    const alloc = gpa.allocator();
+    const alloc = if (builtin.mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.c_allocator;
 
     var args = try Args.init(alloc);
     defer args.deinit();

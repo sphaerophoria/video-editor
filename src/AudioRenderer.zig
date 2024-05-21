@@ -196,9 +196,6 @@ pub fn initGl(self: *AudioRenderer, guigl: ?*anyopaque) void {
 }
 
 fn updateVertexBuffer(self: *AudioRenderer, guigl: ?*c.GuiGl) void {
-    var vertices = std.ArrayList(f32).init(self.alloc);
-    defer vertices.deinit();
-
     self.shared.mutex.lock();
     defer self.shared.mutex.unlock();
     if (self.last_buf_len == self.shared.samples.items.len) {
@@ -207,20 +204,28 @@ fn updateVertexBuffer(self: *AudioRenderer, guigl: ?*c.GuiGl) void {
 
     self.last_buf_len = self.shared.samples.items.len;
 
+    var vertices = self.alloc.alloc(f32, self.shared.samples.items.len * 4) catch {
+        std.log.err("Failed to allocate vertex buffer for audio data", .{});
+        return;
+    };
+    defer self.alloc.free(vertices);
+
+    const item_len_i: i64 = @intCast(self.shared.num_samples);
+    const num_samples_f: f32 = @floatFromInt(self.shared.num_samples);
     for (self.shared.samples.items, 0..) |sample, i_u| {
         const i_i: i64 = @intCast(i_u);
-        const item_len_i: i64 = @intCast(self.shared.num_samples);
         var x_norm: f32 = @floatFromInt(2 * i_i - item_len_i);
-        x_norm /= @floatFromInt(self.shared.num_samples);
-        vertices.append(x_norm) catch {};
-        vertices.append(sample.min) catch {};
-        vertices.append(x_norm) catch {};
-        vertices.append(sample.max) catch {};
+        x_norm /= num_samples_f;
+        const vert_idx = i_u * 4;
+        vertices[vert_idx] = x_norm;
+        vertices[vert_idx + 1] = sample.min;
+        vertices[vert_idx + 2] = x_norm;
+        vertices[vert_idx + 3] = sample.max;
     }
 
     c.guigl_bind_vertex_array(guigl, self.vao);
     c.guigl_bind_buffer(guigl, c.GL_ARRAY_BUFFER, self.vbo);
-    c.guigl_buffer_data(guigl, c.GL_ARRAY_BUFFER, @intCast(vertices.items.len * 4), vertices.items.ptr, c.GL_STATIC_DRAW);
+    c.guigl_buffer_data(guigl, c.GL_ARRAY_BUFFER, @intCast(vertices.len * 4), vertices.ptr, c.GL_STATIC_DRAW);
     c.guigl_vertex_attrib_pointer(guigl, 0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * 4, null);
     c.guigl_enable_vertex_attrib_array(guigl, 0);
 }
