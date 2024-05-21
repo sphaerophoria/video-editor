@@ -129,7 +129,11 @@ pub const StreamIt = struct {
 
         defer self.i += 1;
         const stream: *c.AVStream = self.fmt_ctx.streams[self.i];
-        const id = try cIntToUsize(stream.id, "stream id");
+        // NOTE: There is a stream ID in the stream info, but we
+        // only care about it as far as we want to index into our
+        // streams array. Using the ffmpeg id is just more confusing
+        // and complex
+        const id = self.i;
         const codec_params = stream.codecpar.*;
         const codec_type = codec_params.codec_type;
 
