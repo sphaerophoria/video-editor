@@ -332,9 +332,15 @@ pub const VideoDecoder = struct {
         const colorspace = resolveColorspaceYuv(frame.colorspace, height);
 
         if (colorspace != c.AVCOL_SPC_BT470BG) {
-            // Major assumption made in OpenGL conversion about data format
-            std.log.err("Unsupported colorspace: {d}", .{frame.colorspace});
-            return VideoDecoderError.Unimplemented;
+            const already = struct {
+                var warned: bool = false;
+            };
+
+            if (!already.warned) {
+                // Major assumption made in OpenGL conversion about data format
+                std.log.warn("Unsupported colorspace: {d}", .{frame.colorspace});
+                already.warned = true;
+            }
         }
 
         if (frame.linesize[1] != @divTrunc(frame.linesize[0], 2) or frame.linesize[2] != @divTrunc(frame.linesize[0], 2)) {
