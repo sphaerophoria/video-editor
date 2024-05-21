@@ -405,7 +405,7 @@ pub const VideoDecoder = struct {
         stream_id: usize,
     };
 
-    fn readNextFrame(self: *VideoDecoder) VideoDecoderError!NextFrame {
+    fn readNextFrame(self: *VideoDecoder, stream_id: ?usize) VideoDecoderError!NextFrame {
         while (true) {
             c.av_packet_unref(self.packet);
             const av_read_frame_ret = c.av_read_frame(self.fmt_ctx, self.packet);
@@ -415,6 +415,10 @@ pub const VideoDecoder = struct {
             if (av_read_frame_ret < 0) {
                 std.log.err("failed to read frame", .{});
                 return error.InvalidData;
+            }
+
+            if (stream_id != null and self.packet.stream_index != stream_id.?) {
+                continue;
             }
 
             if (self.packet.stream_index >= self.decoder_ctxs.items.len or self.packet.stream_index < 0) {
@@ -451,9 +455,9 @@ pub const VideoDecoder = struct {
         }
     }
 
-    pub fn next(self: *VideoDecoder) VideoDecoderError!?Frame {
+    pub fn next(self: *VideoDecoder, stream_id: ?usize) VideoDecoderError!?Frame {
         while (true) {
-            const next_frame = self.readNextFrame() catch |e| {
+            const next_frame = self.readNextFrame(stream_id) catch |e| {
                 if (e == VideoDecoderError.Again) {
                     continue;
                 } else if (e == VideoDecoderError.Eof) {

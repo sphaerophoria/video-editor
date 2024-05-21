@@ -238,7 +238,7 @@ const PlayerState = struct {
 
 fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player, stream_id: ?usize) !?decoder.VideoFrame {
     while (true) {
-        var frame = try dec.next();
+        var frame = try dec.next(null);
         if (frame == null) {
             return null;
         }
