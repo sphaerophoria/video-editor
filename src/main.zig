@@ -8,6 +8,7 @@ const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
 const App = @import("App.zig");
 const AudioRenderer = @import("AudioRenderer.zig");
+const ClipManager = @import("ClipManager.zig");
 
 const ArgParseError = std.process.ArgIterator.InitError;
 
@@ -147,7 +148,11 @@ pub fn main() !void {
 
     var frame_renderer = FrameRenderer.init(&frame_renderer_shared);
 
-    var app_state = App.AppState.init();
+    var app_state = App.AppState.init(alloc);
+    defer app_state.deinit();
+
+    var clip_manager = try ClipManager.init(alloc, dec.duration);
+    defer clip_manager.deinit();
 
     const audio_player = try makeAudioPlayer(alloc, &dec);
     defer if (audio_player) |p| p.deinit();
@@ -162,6 +167,7 @@ pub fn main() !void {
         .app_state = &app_state,
         .dec = &dec,
         .audio_player = audio_player,
+        .clip_manager = &clip_manager,
     };
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{app_refs});

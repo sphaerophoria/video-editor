@@ -18,26 +18,49 @@ unsafe impl Sync for RendererPtr {}
 
 mod gui_actions {
     use crate::c_bindings::*;
-    pub const NONE: GuiAction = GuiAction {
-        tag: GuiActionTag_gui_action_none,
-        seek_position: 0.0,
-    };
 
-    pub const TOGGLE_PAUSE: GuiAction = GuiAction {
-        tag: GuiActionTag_gui_action_toggle_pause,
-        seek_position: 0.0,
-    };
+    fn make_action(tag: GuiActionTag) -> GuiAction {
+        unsafe {
+            let mut ret = std::mem::MaybeUninit::<GuiAction>::zeroed();
+            (*ret.as_mut_ptr()).tag = tag;
+            ret.assume_init()
+        }
+    }
 
-    pub const CLOSE: GuiAction = GuiAction {
-        tag: GuiActionTag_gui_action_close,
-        seek_position: 0.0,
-    };
+    pub fn none() -> GuiAction {
+        make_action(GuiActionTag_gui_action_none)
+    }
+
+    pub fn toggle_pause() -> GuiAction {
+        make_action(GuiActionTag_gui_action_toggle_pause)
+    }
+
+    pub fn close() -> GuiAction {
+        make_action(GuiActionTag_gui_action_close)
+    }
 
     pub fn seek(pos: f32) -> GuiAction {
-        GuiAction {
-            tag: GuiActionTag_gui_action_seek,
-            seek_position: pos,
-        }
+        let mut ret = make_action(GuiActionTag_gui_action_seek);
+        ret.data.seek_position = pos;
+        ret
+    }
+
+    pub fn clip_add(clip: &Clip) -> GuiAction {
+        let mut ret = make_action(GuiActionTag_gui_action_clip_add);
+        ret.data.clip = *clip;
+        ret
+    }
+
+    pub fn clip_remove(current_pos: f32) -> GuiAction {
+        let mut ret = make_action(GuiActionTag_gui_action_clip_remove);
+        ret.data.seek_position = current_pos;
+        ret
+    }
+
+    pub fn clip_edit(clip: &Clip) -> GuiAction {
+        let mut ret = make_action(GuiActionTag_gui_action_clip_edit);
+        ret.data.clip = *clip;
+        ret
     }
 }
 
@@ -120,9 +143,9 @@ pub unsafe extern "C" fn gui_next_action(gui: *mut Gui) -> c_bindings::GuiAction
     }
 
     if inner.ctx.is_some() {
-        gui_actions::NONE
+        gui_actions::none()
     } else {
-        gui_actions::CLOSE
+        gui_actions::close()
     }
 }
 
@@ -150,23 +173,102 @@ pub unsafe extern "C" fn gui_close(gui: *mut Gui) {
     }
 }
 
-/// Conversions between "rect" space, which is the position in the window in pixels, and "audio"
-/// space, which is the normalized position in the un-zoomed audio widget.
-struct AudioWidgetPosConverter<'a> {
-    zoom: &'a f32,
-    widget_center_norm: &'a f32,
-    rect: &'a egui::Rect,
+struct ClipTimelineRenderer<'a> {
+    converter: &'a ProgressPosConverter,
+    ui: &'a mut egui::Ui,
+    progress_bar: &'a mut ProgressBar,
+    state: &'a c_bindings::AppStateSnapshot,
+    action_tx: &'a Sender<c_bindings::GuiAction>,
 }
 
-impl AudioWidgetPosConverter<'_> {
-    fn audio_to_rect(&self, audio_pos_norm: f32) -> f32 {
-        let progress_norm_adjusted = (audio_pos_norm - self.widget_center_norm) * self.zoom + 0.5;
-        progress_norm_adjusted * self.rect.width() + self.rect.left()
+impl ClipTimelineRenderer<'_> {
+    fn render_clip(&mut self, clip: &c_bindings::Clip) {
+        let mut edited_clip = *clip;
+
+        let mut changed = false;
+
+        let sense = egui::Sense {
+            click: false,
+            drag: true,
+            focusable: false,
+        };
+
+        let start_rect = self.converter.duration_to_full_rect(clip.start, 2.0);
+        let start_response = self.ui.allocate_rect(start_rect, sense);
+        if let Some(pos) = self.progress_bar.handle_seek(
+            self.converter,
+            &start_response,
+            self.state,
+            self.action_tx,
+        ) {
+            changed = true;
+            edited_clip.start = pos;
+        }
+
+        let end_rect = self.converter.duration_to_full_rect(clip.end, 2.0);
+        let end_response = self.ui.allocate_rect(end_rect, sense);
+        if let Some(pos) =
+            self.progress_bar
+                .handle_seek(self.converter, &end_response, self.state, self.action_tx)
+        {
+            changed = true;
+            edited_clip.end = pos;
+        }
+
+        let mut clip_rect = self.converter.rect;
+        clip_rect.set_left(self.converter.duration_to_rect_pos(clip.start));
+        clip_rect.set_right(self.converter.duration_to_rect_pos(clip.end));
+
+        let stroke = egui::Stroke {
+            width: 2.0,
+            color: egui::Color32::RED,
+        };
+        self.ui.painter().rect_stroke(clip_rect, 0.0, stroke);
+        let red = egui::Color32::RED;
+        let red_feint = egui::Color32::from_rgba_unmultiplied(red.r(), red.g(), red.b(), 20);
+        self.ui.painter().rect_filled(clip_rect, 0.0, red_feint);
+
+        if changed {
+            self.action_tx
+                .send(gui_actions::clip_edit(&edited_clip))
+                .unwrap();
+        }
+    }
+}
+
+/// Conversions between "rect" space, which is the position in the window in pixels, and "audio"
+/// space, which is the normalized position in the un-zoomed audio widget.
+struct ProgressPosConverter {
+    zoom: f32,
+    widget_center_norm: f32,
+    rect: egui::Rect,
+    total_runtime: f32,
+}
+
+impl ProgressPosConverter {
+    fn duration_to_rect_pos(&self, duration_pos: f32) -> f32 {
+        let duration_pos_norm = duration_pos / self.total_runtime;
+        let duration_norm_adjusted =
+            (duration_pos_norm - self.widget_center_norm) * self.zoom + 0.5;
+        duration_norm_adjusted * self.rect.width() + self.rect.left()
     }
 
-    fn rect_to_audio(&self, x_pos_rect: f32) -> f32 {
+    fn duration_to_full_rect(&self, duration_pos: f32, width: f32) -> egui::Rect {
+        let progress_rect_cx = self.duration_to_rect_pos(duration_pos);
+        let mut progress_rect = self.rect;
+        progress_rect.set_width(width);
+        progress_rect.set_center(egui::pos2(progress_rect_cx, progress_rect.center().y));
+
+        progress_rect
+    }
+
+    fn rect_to_duration_norm(&self, x_pos_rect: f32) -> f32 {
         let rect_pos_norm = (x_pos_rect - self.rect.left()) / self.rect.width();
         (rect_pos_norm - 0.5) / self.zoom + self.widget_center_norm
+    }
+
+    fn rect_to_duration(&self, x_pos_rect: f32) -> f32 {
+        self.rect_to_duration_norm(x_pos_rect) * self.total_runtime
     }
 }
 
@@ -174,36 +276,66 @@ struct ProgressBar {
     paused_on_click: bool,
     zoom: f32,
     widget_center_norm: f32,
+    pending_clip: Option<c_bindings::Clip>,
 }
 
 impl ProgressBar {
-    fn handle_seek(
+    fn handle_clip_creation(
         &mut self,
+        converter: &ProgressPosConverter,
+        ui: &egui::Ui,
         response: &egui::Response,
-        state: &c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
     ) {
         let primary_down = response.dragged_by(egui::PointerButton::Primary);
-        if primary_down {
+        let ctrl_down = ui.input(|i| i.modifiers.ctrl);
+
+        if let Some(pending_clip) = &mut self.pending_clip {
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                action_tx.send(gui_actions::clip_add(pending_clip)).unwrap();
+                self.pending_clip = None;
+            } else {
+                let pos = response
+                    .interact_pointer_pos()
+                    .expect("Pointer should interact if dragging");
+                let duration_pos = converter.rect_to_duration(pos.x);
+                pending_clip.end = duration_pos;
+            }
+        } else if primary_down && ctrl_down {
             let pos = response
                 .interact_pointer_pos()
                 .expect("Pointer should interact if dragging");
-            let converter = AudioWidgetPosConverter {
-                zoom: &self.zoom,
-                widget_center_norm: &self.widget_center_norm,
-                rect: &response.rect,
-            };
+            let duration_pos = converter.rect_to_duration(pos.x);
+            self.pending_clip = Some(c_bindings::Clip {
+                id: 0,
+                start: duration_pos,
+                end: duration_pos,
+            });
+        }
+    }
 
-            let audio_pos_norm = converter.rect_to_audio(pos.x);
-            action_tx
-                .send(gui_actions::seek(audio_pos_norm * state.total_runtime))
-                .unwrap();
+    fn handle_seek(
+        &mut self,
+        converter: &ProgressPosConverter,
+        response: &egui::Response,
+        state: &c_bindings::AppStateSnapshot,
+        action_tx: &Sender<c_bindings::GuiAction>,
+    ) -> Option<f32> {
+        let mut ret = None;
+
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let pos = response
+                .interact_pointer_pos()
+                .expect("Pointer should interact if dragging");
+            let duration_pos = converter.rect_to_duration(pos.x);
+            action_tx.send(gui_actions::seek(duration_pos)).unwrap();
+            ret = Some(duration_pos);
         }
 
         if response.drag_started_by(egui::PointerButton::Primary) {
             self.paused_on_click = state.paused;
             if !state.paused {
-                action_tx.send(gui_actions::TOGGLE_PAUSE).unwrap();
+                action_tx.send(gui_actions::toggle_pause()).unwrap();
             }
         }
 
@@ -218,8 +350,10 @@ impl ProgressBar {
             // that we didn't want, but that's a fine tradeoff here
             && !self.paused_on_click
         {
-            action_tx.send(gui_actions::TOGGLE_PAUSE).unwrap();
+            action_tx.send(gui_actions::toggle_pause()).unwrap();
         }
+
+        ret
     }
 
     fn handle_pan(&mut self, ui: &egui::Ui, response: &egui::Response) {
@@ -230,7 +364,12 @@ impl ProgressBar {
         }
     }
 
-    fn handle_zoom(&mut self, ui: &egui::Ui, response: &egui::Response) {
+    fn handle_zoom(
+        &mut self,
+        converter: &ProgressPosConverter,
+        ui: &egui::Ui,
+        response: &egui::Response,
+    ) {
         if response.contains_pointer() {
             // If for whatever reason we cannot find the pointer pos, just use the middle of the
             // widget
@@ -238,12 +377,7 @@ impl ProgressBar {
             if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
                 // NOTE: We want to zoom so that the mouse stays in the same spot. This means that the
                 // distance from the center to the pointer needs to stay the same
-                let converter = AudioWidgetPosConverter {
-                    zoom: &self.zoom,
-                    widget_center_norm: &self.widget_center_norm,
-                    rect: &response.rect,
-                };
-                pointer_pos_audio = converter.rect_to_audio(pointer_pos.x);
+                pointer_pos_audio = converter.rect_to_duration_norm(pointer_pos.x);
             }
 
             let old_zoom = self.zoom;
@@ -272,79 +406,118 @@ impl ProgressBar {
 
     fn handle_response(
         &mut self,
+        converter: &ProgressPosConverter,
         ui: &egui::Ui,
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
     ) {
-        self.handle_seek(response, state, action_tx);
+        self.handle_clip_creation(converter, ui, response, action_tx);
+        self.handle_seek(converter, response, state, action_tx);
         self.handle_pan(ui, response);
-        self.handle_zoom(ui, response);
+        self.handle_zoom(converter, ui, response);
         self.clamp_widget_center();
     }
 
     fn show(
         &mut self,
         ui: &mut egui::Ui,
-        state: c_bindings::AppStateSnapshot,
+        state: &SnapshotHolder,
         action_tx: &Sender<c_bindings::GuiAction>,
         audio_renderer: RendererPtr,
     ) {
-        let response = ui
-            .with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
-                let response = ui.allocate_response(
-                    egui::vec2(ui.available_width(), 60.0),
-                    egui::Sense {
-                        click: false,
-                        drag: true,
-                        focusable: false,
-                    },
-                );
+        ui.with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
+            let response = ui.allocate_response(
+                egui::vec2(ui.available_width(), 60.0),
+                egui::Sense {
+                    click: false,
+                    drag: true,
+                    focusable: false,
+                },
+            );
 
-                let rect = response.rect;
-                let zoom = self.zoom;
-                let center_norm = self.widget_center_norm;
-                let callback = egui::PaintCallback {
-                    rect,
-                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
-                        move |_info, painter| {
-                            let audio_renderer = &audio_renderer;
-                            unsafe {
-                                let userdata: *const glow::Context = &**painter.gl();
-                                c_bindings::audiorenderer_render(
-                                    audio_renderer.0,
-                                    userdata as *mut c_void,
-                                    zoom,
-                                    center_norm,
-                                );
-                            }
-                        },
-                    )),
-                };
-                ui.painter().add(callback);
+            let converter = ProgressPosConverter {
+                zoom: self.zoom,
+                widget_center_norm: self.widget_center_norm,
+                rect: response.rect,
+                total_runtime: state.total_runtime,
+            };
 
-                let converter = AudioWidgetPosConverter {
-                    zoom: &self.zoom,
-                    widget_center_norm: &self.widget_center_norm,
-                    rect: &rect,
-                };
+            let rect = response.rect;
+            let zoom = self.zoom;
+            let center_norm = self.widget_center_norm;
+            let callback = egui::PaintCallback {
+                rect,
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    let audio_renderer = &audio_renderer;
+                    unsafe {
+                        let userdata: *const glow::Context = &**painter.gl();
+                        c_bindings::audiorenderer_render(
+                            audio_renderer.0,
+                            userdata as *mut c_void,
+                            zoom,
+                            center_norm,
+                        );
+                    }
+                })),
+            };
+            ui.painter().add(callback);
 
-                let progress_rect_cx =
-                    converter.audio_to_rect(state.current_position / state.total_runtime);
-                let mut progress_rect = rect;
-                progress_rect.set_width(2.0);
-                progress_rect.set_center(egui::pos2(progress_rect_cx, progress_rect.center().y));
+            let pending_clip = self.pending_clip;
+            let mut clip_renderer = ClipTimelineRenderer {
+                converter: &converter,
+                ui,
+                progress_bar: self,
+                state,
+                action_tx,
+            };
 
-                ui.painter()
-                    .rect_filled(progress_rect, 0.0, egui::Color32::YELLOW);
+            for i in 0..state.num_clips {
+                let clip = unsafe { *state.clips.add(i as usize) };
+                clip_renderer.render_clip(&clip);
+            }
 
-                response
-            })
-            .inner;
+            if let Some(pending_clip) = pending_clip {
+                clip_renderer.render_clip(&pending_clip)
+            }
 
-        self.handle_response(ui, &response, &state, action_tx);
+            let progress_rect = converter.duration_to_full_rect(state.current_position, 3.0);
+            ui.painter()
+                .rect_filled(progress_rect, 0.0, egui::Color32::YELLOW);
+
+            self.handle_response(&converter, ui, &response, state, action_tx);
+        });
     }
 }
+
+struct SnapshotHolder {
+    app_state: *mut c_bindings::AppState,
+    snapshot: c_bindings::AppStateSnapshot,
+}
+
+impl SnapshotHolder {
+    fn new(app_state: *mut c_bindings::AppState) -> SnapshotHolder {
+        let snapshot = unsafe { c_bindings::appstate_snapshot(app_state) };
+        SnapshotHolder {
+            app_state,
+            snapshot,
+        }
+    }
+}
+
+impl std::ops::Deref for SnapshotHolder {
+    type Target = c_bindings::AppStateSnapshot;
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
+    }
+}
+
+impl Drop for SnapshotHolder {
+    fn drop(&mut self) {
+        unsafe { c_bindings::appstate_deinit(self.app_state, &self.snapshot) }
+    }
+}
+
 struct EframeImpl {
     frame_renderer: RendererPtr,
     audio_renderer: RendererPtr,
@@ -380,6 +553,7 @@ impl EframeImpl {
                 paused_on_click: false,
                 zoom: 1.0,
                 widget_center_norm: 0.5,
+                pending_clip: None,
             },
         }
     }
@@ -389,15 +563,16 @@ impl eframe::App for EframeImpl {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut frame = egui::Frame::central_panel(&ctx.style());
         frame.inner_margin = egui::Margin::same(0.0);
-        egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
-            let state = unsafe { c_bindings::appstate_snapshot((*self.gui).state) };
 
+        let state = unsafe { SnapshotHolder::new((*self.gui).state) };
+
+        egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
             let button_text = if state.paused { "play" } else { "pause" };
 
             ui.horizontal(|ui| {
                 if ui.button(button_text).clicked() {
                     self.action_tx
-                        .send(gui_actions::TOGGLE_PAUSE)
+                        .send(gui_actions::toggle_pause())
                         .expect("failed to send action from gui");
                 };
 
@@ -406,11 +581,18 @@ impl eframe::App for EframeImpl {
                     state.current_position, state.total_runtime
                 ));
                 ui.spacing_mut().slider_width = ui.available_width();
+
+                if ui.button("Delete clip").clicked() {
+                    self.action_tx
+                        .send(gui_actions::clip_remove(state.current_position))
+                        .unwrap();
+                }
             });
 
             self.progress_bar
-                .show(ui, state, &self.action_tx, self.audio_renderer.clone());
+                .show(ui, &state, &self.action_tx, self.audio_renderer.clone());
         });
+
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.input(|input| {
                 for event in &input.events {
@@ -421,7 +603,7 @@ impl eframe::App for EframeImpl {
                     } = event
                     {
                         self.action_tx
-                            .send(gui_actions::TOGGLE_PAUSE)
+                            .send(gui_actions::toggle_pause())
                             .expect("failed to send action from gui");
                     }
                 }

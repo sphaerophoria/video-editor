@@ -10,22 +10,37 @@ typedef void GuiGl;
 typedef void Gui;
 typedef void AppState;
 
+struct Clip {
+    uint64_t id;
+    float start;
+    float end;
+};
+
 enum GuiActionTag {
     gui_action_none,
     gui_action_toggle_pause,
     gui_action_close,
     gui_action_seek,
+    gui_action_clip_edit,
+    gui_action_clip_add,
+    gui_action_clip_remove,
 };
 
 struct GuiAction {
     enum GuiActionTag tag;
-    float seek_position;
+    union {
+        float seek_position;
+        struct Clip clip;
+        uint64_t id;
+    } data;
 };
 
 struct AppStateSnapshot {
     bool paused;
     float current_position;
     float total_runtime;
+    const struct Clip* clips;
+    uint64_t num_clips;
 };
 
 // GUI interface
@@ -84,5 +99,6 @@ void audiorenderer_render(AudioRenderer* renderer, GuiGl* guigl, float zoom, flo
 void audiorenderer_deinit_gl(AudioRenderer* renderer, GuiGl* guigl);
 
 struct AppStateSnapshot appstate_snapshot(AppState* app);
+void appstate_deinit(AppState* app, const struct AppStateSnapshot* snapshot);
 
 #endif // __GUI_H__

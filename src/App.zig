@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const c = @import("c.zig");
+const ClipManager = @import("ClipManager.zig");
 const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
@@ -13,6 +14,7 @@ pub const AppRefs = struct {
     app_state: *AppState,
     dec: *decoder.VideoDecoder,
     audio_player: ?*audio.Player,
+    clip_manager: *ClipManager,
 };
 
 const App = @This();
@@ -47,7 +49,7 @@ pub fn run(self: *App) !void {
             break;
         }
         try self.updateVideoFrame(now);
-        self.updateAppState();
+        try self.updateAppState();
         try self.sleepUntilNextFrame();
     }
 }
@@ -68,7 +70,22 @@ fn applyGuiActions(self: *App, now: std.time.Instant) !bool {
                 return true;
             },
             c.gui_action_seek => {
-                seek_position = action.seek_position;
+                seek_position = action.data.seek_position;
+                c.gui_notify_update(self.refs.gui);
+            },
+            c.gui_action_clip_edit => {
+                self.refs.clip_manager.update(action.data.clip);
+                c.gui_notify_update(self.refs.gui);
+            },
+            c.gui_action_clip_remove => {
+                const clip = self.refs.clip_manager.clipForPts(action.data.seek_position);
+                if (clip) |cl| {
+                    self.refs.clip_manager.remove(cl.id);
+                }
+            },
+            c.gui_action_clip_add => {
+                try self.refs.clip_manager.add(action.data.clip);
+                c.gui_notify_update(self.refs.gui);
             },
             else => {
                 std.debug.panic("invalid action: {d}", .{action.tag});
@@ -117,22 +134,41 @@ fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
 }
 
 fn updateVideoFrame(self: *App, now: std.time.Instant) !void {
+    const clip_for_pts = self.refs.clip_manager.clipForPts(self.last_pts);
+
     while (self.player_state.shouldUpdateFrame(now, self.last_pts)) {
-        const new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id) orelse {
+        var new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id) orelse {
             self.setEndOfVideo(now);
             break;
         };
+
+        if (clip_for_pts) |cl| {
+            if (new_img.pts > cl.end) {
+                defer new_img.deinit();
+
+                if (self.refs.clip_manager.nextClip(cl.id)) |next_clip| {
+                    try self.seekToPts(now, next_clip.start);
+                } else {
+                    self.player_state.pause(now);
+                }
+
+                c.gui_notify_update(self.refs.gui);
+                break;
+            }
+        }
+
         self.last_pts = new_img.pts;
         self.refs.frame_renderer.swapFrame(new_img);
         c.gui_notify_update(self.refs.gui);
     }
 }
 
-fn updateAppState(self: *App) void {
-    self.refs.app_state.setSnapshot(.{
+fn updateAppState(self: *App) !void {
+    try self.refs.app_state.setSnapshot(.{
         .paused = self.player_state.isPaused(),
         .current_position = self.last_pts,
         .total_runtime = self.refs.dec.duration,
+        .clips = self.refs.clip_manager.clips.items,
     });
 }
 
@@ -152,29 +188,90 @@ fn sleepUntilNextFrame(self: *App) !void {
 
 pub const AppState = struct {
     mutex: std.Thread.Mutex,
-    inner: c.AppStateSnapshot,
+    alloc: Allocator,
+    snapshot: Snapshot,
 
-    pub fn init() AppState {
+    const Snapshot = struct {
+        paused: bool,
+        current_position: f32,
+        total_runtime: f32,
+        clips: []const c.Clip,
+
+        fn clone(self: *const @This(), alloc: Allocator) !Snapshot {
+            const new_clips = try alloc.dupe(c.Clip, self.clips);
+            var ret = self.*;
+            ret.clips = new_clips;
+            return ret;
+        }
+
+        fn toCRepr(self: *@This()) c.AppStateSnapshot {
+            return .{
+                .paused = self.paused,
+                .current_position = self.current_position,
+                .total_runtime = self.total_runtime,
+                .clips = self.clips.ptr,
+                .num_clips = self.clips.len,
+            };
+        }
+
+        fn fromCRepr(c_repr: c.AppStateSnapshot) Snapshot {
+            return .{
+                .paused = c_repr.paused,
+                .current_position = c_repr.current_position,
+                .total_runtime = c_repr.total_runtime,
+                .clips = c_repr.clips[0..c_repr.num_clips],
+            };
+        }
+
+        fn deinit(self: *@This(), alloc: Allocator) void {
+            alloc.free(self.clips);
+        }
+    };
+
+    pub fn init(alloc: Allocator) AppState {
         return .{
             .mutex = .{},
-            .inner = .{
+            .alloc = alloc,
+            .snapshot = .{
                 .paused = false,
                 .current_position = 0.0,
+                .total_runtime = 0.0,
+                .clips = &.{},
             },
         };
     }
 
-    pub fn setSnapshot(self: *AppState, snapshot: c.AppStateSnapshot) void {
+    pub fn setSnapshot(self: *AppState, snapshot: Snapshot) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.inner = snapshot;
+
+        const new_snapshot = try snapshot.clone(self.alloc);
+        self.snapshot.deinit(self.alloc);
+        self.snapshot = new_snapshot;
+    }
+
+    pub fn deinit(self: *AppState) void {
+        self.snapshot.deinit(self.alloc);
     }
 };
 
 pub export fn appstate_snapshot(state: *AppState) c.AppStateSnapshot {
     state.mutex.lock();
     defer state.mutex.unlock();
-    return state.inner;
+
+    var output_snapshot = state.snapshot.clone(state.alloc) catch {
+        std.debug.panic("Failed to snapshot app state", .{});
+    };
+
+    return output_snapshot.toCRepr();
+}
+
+pub export fn appstate_deinit(state: *AppState, c_repr: *const c.AppStateSnapshot) void {
+    state.mutex.lock();
+    defer state.mutex.unlock();
+
+    var snapshot = AppState.Snapshot.fromCRepr(c_repr.*);
+    snapshot.deinit(state.alloc);
 }
 
 const PlayerState = struct {

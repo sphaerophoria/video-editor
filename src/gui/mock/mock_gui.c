@@ -6,17 +6,11 @@
 #include <string.h>
 #include <unistd.h>
 
-enum GuiState {
-  kGuiStateFinished,
-  kGuiStateTogglePause,
-  kGuiStateSeek,
-  kGuiStateNormal,
-};
-
 #define MAX_ALLOCATIONS 100
 struct GuiImpl {
-  pthread_mutex_t state_mutex;
-  enum GuiState state;
+  pthread_mutex_t trigger_action_mutex;
+  int trigger_action;
+  int next_action_id;
   float seek_pos;
   unsigned int allocation_id;
   void* allocations[MAX_ALLOCATIONS];
@@ -199,9 +193,10 @@ void guigl_enable_vertex_attrib_array(GuiGl* guigl, GLuint index) {
 Gui* gui_init(AppState* state) {
   (void)state;
   struct GuiImpl* impl = malloc(sizeof(struct GuiImpl));
-  pthread_mutex_init(&impl->state_mutex, NULL);
-  impl->state = kGuiStateNormal;
+  pthread_mutex_init(&impl->trigger_action_mutex, NULL);
   impl->allocation_id = 0;
+  impl->trigger_action = -1;
+  impl->next_action_id = 0;
   memset(impl->allocations, 0, MAX_ALLOCATIONS);
 
   return impl;
@@ -209,68 +204,76 @@ Gui* gui_init(AppState* state) {
 
 void gui_free(Gui* gui) { free(gui); }
 
+struct TimedGuiAction {
+  int i;
+  struct GuiAction action;
+};
+
+#define NUM_GUI_ACTIONS 8
+#define NUM_ITERS (60 * 3)
+const struct TimedGuiAction kGuiActions[NUM_GUI_ACTIONS] = {
+    {.i = 0, .action = {.tag = gui_action_clip_add, .data = {.clip = {0}}}},
+    {.i = 15,
+     .action =
+         {
+             .tag = gui_action_toggle_pause,
+         }},
+    {.i = 18,
+     .action = {.tag = gui_action_seek, .data = {.seek_position = 5.0F}}},
+    {.i = 30,
+     .action =
+         {
+             .tag = gui_action_toggle_pause,
+         }},
+    {.i = 70,
+     .action = {.tag = gui_action_seek, .data = {.seek_position = 0.0F}}},
+    {.i = 95,
+     .action = {.tag = gui_action_clip_edit,
+                .data = {.clip = {.id = 0, .start = 0, .end = 5}}}},
+    {.i = 105,
+     .action = {.tag = gui_action_clip_remove, .data = {.seek_position = 2}}},
+    {.i = NUM_ITERS - 1,
+     .action =
+         {
+             .tag = gui_action_close,
+         }},
+};
+
 void gui_run(Gui* gui, FrameRenderer* frame_renderer,
              AudioRenderer* audio_renderer) {
   struct GuiImpl* impl = gui;
   framerenderer_init_gl(frame_renderer, gui);
   audiorenderer_init_gl(audio_renderer, gui);
-  for (int i = 0; i < 60 * 3; ++i) {
+  for (int i = 0; i < NUM_ITERS; ++i) {
     framerenderer_render(frame_renderer, 800.0, 600.0, gui);
     audiorenderer_render(audio_renderer, gui, 1.0, 0.5);
-    if (i % 60 == 15) {
-      pthread_mutex_lock(&impl->state_mutex);
-      impl->state = kGuiStateSeek;
-      // Looking for some combo of seeking both forwards and backwards
-      impl->seek_pos = i % 13;
-      pthread_mutex_unlock(&impl->state_mutex);
-    } else if (i % 30 == 0) {
-      pthread_mutex_lock(&impl->state_mutex);
-      impl->state = kGuiStateTogglePause;
-      pthread_mutex_unlock(&impl->state_mutex);
+
+    if (impl->next_action_id < NUM_GUI_ACTIONS &&
+        i == kGuiActions[impl->next_action_id].i) {
+      pthread_mutex_lock(&impl->trigger_action_mutex);
+      impl->trigger_action = impl->next_action_id;
+      pthread_mutex_unlock(&impl->trigger_action_mutex);
+      impl->next_action_id += 1;
     }
+
     // 60fps
     usleep(16666);
   }
   audiorenderer_deinit_gl(audio_renderer, gui);
   framerenderer_deinit_gl(frame_renderer, gui);
-
-  pthread_mutex_lock(&impl->state_mutex);
-  impl->state = kGuiStateFinished;
-  pthread_mutex_unlock(&impl->state_mutex);
 }
 
 struct GuiAction gui_next_action(Gui* gui) {
   struct GuiImpl* impl = gui;
-  pthread_mutex_lock(&impl->state_mutex);
+  pthread_mutex_lock(&impl->trigger_action_mutex);
   struct GuiAction ret = {0};
 
-  switch (impl->state) {
-    case kGuiStateNormal: {
-      ret.tag = gui_action_none;
-      break;
-    }
-    case kGuiStateTogglePause: {
-      impl->state = kGuiStateNormal;
-      ret.tag = gui_action_toggle_pause;
-      break;
-    }
-    case kGuiStateSeek: {
-      impl->state = kGuiStateNormal;
-      ret.tag = gui_action_seek;
-      ret.seek_position = impl->seek_pos;
-      break;
-    }
-    case kGuiStateFinished: {
-      ret.tag = gui_action_close;
-      break;
-    }
-    default: {
-      fprintf(stderr, "gui in invalid state\n");
-      exit(1);
-    }
+  if (impl->trigger_action >= 0) {
+    ret = kGuiActions[impl->trigger_action].action;
+    impl->trigger_action = -1;
   }
 
-  pthread_mutex_unlock(&impl->state_mutex);
+  pthread_mutex_unlock(&impl->trigger_action_mutex);
   return ret;
 }
 
