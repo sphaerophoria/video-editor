@@ -9,17 +9,15 @@ const ClipList = std.ArrayList(c.Clip);
 
 clips: ClipList,
 clip_id: usize,
-duration: f32,
 
 const ClipManager = @This();
 
-pub fn init(alloc: Allocator, duration: f32) !ClipManager {
+pub fn init(alloc: Allocator) !ClipManager {
     var clips = ClipList.init(alloc);
     errdefer clips.deinit();
 
     return .{
         .clips = clips,
-        .duration = duration,
         .clip_id = 0,
     };
 }
