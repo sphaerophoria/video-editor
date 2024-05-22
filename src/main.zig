@@ -15,9 +15,11 @@ const ArgParseError = std.process.ArgIterator.InitError;
 const Args = struct {
     it: std.process.ArgIterator,
     input: [:0]const u8,
+    output: [:0]const u8,
 
     const Switch = enum {
         @"--input",
+        @"--output",
         @"--help",
 
         fn parse(s: []const u8) ?Switch {
@@ -39,6 +41,7 @@ const Args = struct {
         var args = try std.process.argsWithAllocator(alloc);
 
         var input: ?[:0]const u8 = null;
+        var output: ?[:0]const u8 = null;
         const process_name = args.next() orelse "video-editor";
         while (args.next()) |arg| {
             const s = Switch.parse(arg) orelse {
@@ -53,6 +56,12 @@ const Args = struct {
                         help(process_name);
                     };
                 },
+                .@"--output" => {
+                    output = args.next() orelse {
+                        print("--output provided with no file\n", .{});
+                        help(process_name);
+                    };
+                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -62,7 +71,12 @@ const Args = struct {
         return .{
             .it = args,
             .input = input orelse {
-                unreachable;
+                print("input not provided\n", .{});
+                help(process_name);
+            },
+            .output = output orelse {
+                print("output not provided\n", .{});
+                help(process_name);
             },
         };
     }
@@ -76,6 +90,9 @@ const Args = struct {
             switch (value) {
                 .@"--input" => {
                     print("File to work with", .{});
+                },
+                .@"--output" => {
+                    print("Save file", .{});
                 },
                 .@"--help" => {
                     print("Show this help", .{});
@@ -151,7 +168,7 @@ pub fn main() !void {
     var app_state = App.AppState.init(alloc);
     defer app_state.deinit();
 
-    var clip_manager = try ClipManager.init(alloc, dec.duration);
+    var clip_manager = try ClipManager.init(alloc, args.output);
     defer clip_manager.deinit();
 
     const audio_player = try makeAudioPlayer(alloc, &dec);

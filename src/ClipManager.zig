@@ -9,21 +9,53 @@ const ClipList = std.ArrayList(c.Clip);
 
 clips: ClipList,
 clip_id: usize,
+save_path: []const u8,
 
 const ClipManager = @This();
 
-pub fn init(alloc: Allocator) !ClipManager {
+pub fn init(alloc: Allocator, save_path: []const u8) !ClipManager {
     var clips = ClipList.init(alloc);
     errdefer clips.deinit();
+
+    // Ensure writeable before any work is done
+    const f = try std.fs.cwd().createFile(save_path, .{});
+    f.close();
 
     return .{
         .clips = clips,
         .clip_id = 0,
+        .save_path = save_path,
     };
 }
 
 pub fn deinit(self: *ClipManager) void {
     self.clips.deinit();
+}
+
+pub fn save(self: *ClipManager) !void {
+    const f = try std.fs.cwd().createFile(self.save_path, .{});
+    defer f.close();
+
+    var output = std.json.writeStream(f.writer(), .{
+        .whitespace = .indent_2,
+    });
+
+    try output.beginArray();
+    for (self.clips.items) |clip| {
+        try output.beginObject();
+
+        try output.objectField("id");
+        try output.write(clip.id);
+
+        try output.objectField("start");
+        try output.write(clip.start);
+
+        try output.objectField("end");
+        try output.write(clip.end);
+
+        try output.endObject();
+    }
+    try output.endArray();
 }
 
 pub fn update(self: *ClipManager, clip: c.Clip) void {

@@ -209,7 +209,7 @@ struct TimedGuiAction {
   struct GuiAction action;
 };
 
-#define NUM_GUI_ACTIONS 8
+#define NUM_GUI_ACTIONS 9
 #define NUM_ITERS (60 * 3)
 const struct TimedGuiAction kGuiActions[NUM_GUI_ACTIONS] = {
     {.i = 0, .action = {.tag = gui_action_clip_add, .data = {.clip = {0}}}},
@@ -230,6 +230,7 @@ const struct TimedGuiAction kGuiActions[NUM_GUI_ACTIONS] = {
     {.i = 95,
      .action = {.tag = gui_action_clip_edit,
                 .data = {.clip = {.id = 0, .start = 0, .end = 5}}}},
+    {.i = 100, .action = {.tag = gui_action_save}},
     {.i = 105,
      .action = {.tag = gui_action_clip_remove, .data = {.seek_position = 2}}},
     {.i = NUM_ITERS - 1,

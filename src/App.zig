@@ -87,6 +87,9 @@ fn applyGuiActions(self: *App, now: std.time.Instant) !bool {
                 try self.refs.clip_manager.add(action.data.clip);
                 c.gui_notify_update(self.refs.gui);
             },
+            c.gui_action_save => {
+                try self.refs.clip_manager.save();
+            },
             else => {
                 std.debug.panic("invalid action: {d}", .{action.tag});
             },

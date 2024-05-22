@@ -24,6 +24,7 @@ enum GuiActionTag {
     gui_action_clip_edit,
     gui_action_clip_add,
     gui_action_clip_remove,
+    gui_action_save,
 };
 
 struct GuiAction {

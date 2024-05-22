@@ -62,6 +62,10 @@ mod gui_actions {
         ret.data.clip = *clip;
         ret
     }
+
+    pub fn save() -> GuiAction {
+        make_action(GuiActionTag_gui_action_save)
+    }
 }
 
 pub struct GuiInner {
@@ -596,15 +600,27 @@ impl eframe::App for EframeImpl {
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.input(|input| {
                 for event in &input.events {
-                    if let egui::Event::Key {
-                        key: egui::Key::Space,
-                        pressed: true,
-                        ..
-                    } = event
-                    {
-                        self.action_tx
-                            .send(gui_actions::toggle_pause())
-                            .expect("failed to send action from gui");
+                    match event {
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            ..
+                        } => {
+                            self.action_tx
+                                .send(gui_actions::toggle_pause())
+                                .expect("failed to send action from gui");
+                        }
+                        egui::Event::Key {
+                            key: egui::Key::S,
+                            pressed: true,
+                            modifiers: egui::Modifiers { ctrl: true, .. },
+                            ..
+                        } => {
+                            self.action_tx
+                                .send(gui_actions::save())
+                                .expect("failed to send save action from gui");
+                        }
+                        _ => (),
                     }
                 }
             });
