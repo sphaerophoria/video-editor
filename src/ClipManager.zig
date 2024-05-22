@@ -41,21 +41,33 @@ pub fn save(self: *ClipManager) !void {
     });
 
     try output.beginArray();
-    for (self.clips.items) |clip| {
-        try output.beginObject();
+    var clip = self.firstClip() orelse {
+        try output.endArray();
+        return;
+    };
 
-        try output.objectField("id");
-        try output.write(clip.id);
-
-        try output.objectField("start");
-        try output.write(clip.start);
-
-        try output.objectField("end");
-        try output.write(clip.end);
-
-        try output.endObject();
+    try writeClip(clip, &output);
+    while (self.nextClip(clip.id)) |next_clip| {
+        clip = next_clip;
+        try writeClip(clip, &output);
     }
+
     try output.endArray();
+}
+
+fn writeClip(clip: c.Clip, output: anytype) !void {
+    try output.beginObject();
+
+    try output.objectField("id");
+    try output.write(clip.id);
+
+    try output.objectField("start");
+    try output.write(clip.start);
+
+    try output.objectField("end");
+    try output.write(clip.end);
+
+    try output.endObject();
 }
 
 pub fn update(self: *ClipManager, clip: c.Clip) void {
@@ -117,6 +129,21 @@ pub fn nextClip(self: *ClipManager, clip_id: usize) ?c.Clip {
         }
     }
     return next_clip;
+}
+
+fn firstClip(self: *ClipManager) ?c.Clip {
+    if (self.clips.items.len == 0) {
+        return null;
+    }
+
+    var ret = self.clips.items[0];
+    for (1..self.clips.items.len) |i| {
+        const clip = self.clips.items[i];
+        if (lessThan(clip, ret)) {
+            ret = clip;
+        }
+    }
+    return ret;
 }
 
 fn lessThan(a: c.Clip, b: c.Clip) bool {
