@@ -65,7 +65,7 @@ const InitThread = struct {
             return error.NoAudioStream;
         };
 
-        const window_size = calculateWindowSize(stream_info, dec.duration, target_memory_usage_bytes);
+        const window_size = @max(10, calculateWindowSize(stream_info, dec.duration, target_memory_usage_bytes));
 
         // NOTE: This may be larger than the number of samples we actually
         // read. Without much root causing, the timeline lines up better if we
