@@ -21,6 +21,9 @@ valgrind \
         --track-origins=yes \
         --track-fds=yes \
         --error-exitcode=1 \
-        ./zig-out/bin/video-editor --input ./res/BigBuckBunny_320x240_20s.mp4 --output test.json
+        ./zig-out/bin/video-editor \
+                --input ./res/BigBuckBunny_320x240_20s.mp4 \
+                --output test.json \
+                --skip-subtitles
 
 echo "Success"

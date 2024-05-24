@@ -4,7 +4,7 @@ use std::{
     ffi::c_void,
     sync::{
         mpsc::{self, Receiver, Sender},
-        Condvar, Mutex,
+        Arc, Condvar, Mutex,
     },
 };
 
@@ -109,6 +109,7 @@ pub unsafe extern "C" fn gui_run(
     gui: *mut Gui,
     frame_renderer: *mut c_bindings::FrameRenderer,
     audio_renderer: *mut c_bindings::AudioRenderer,
+    wtm: *mut c_bindings::WordTimestampMap,
 ) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
@@ -119,6 +120,8 @@ pub unsafe extern "C" fn gui_run(
 
     let frame_renderer = RendererPtr(frame_renderer);
     let audio_renderer = RendererPtr(audio_renderer);
+    let wtm = RendererPtr(wtm);
+
     eframe::run_native(
         "video editor",
         options,
@@ -131,6 +134,7 @@ pub unsafe extern "C" fn gui_run(
                 cc,
                 frame_renderer,
                 audio_renderer,
+                wtm,
                 gui,
                 action_tx,
             ))
@@ -525,6 +529,7 @@ impl Drop for SnapshotHolder {
 struct EframeImpl {
     frame_renderer: RendererPtr,
     audio_renderer: RendererPtr,
+    wtm: RendererPtr,
     action_tx: Sender<c_bindings::GuiAction>,
     gui: *mut Gui,
     progress_bar: ProgressBar,
@@ -535,6 +540,7 @@ impl EframeImpl {
         cc: &eframe::CreationContext<'_>,
         frame_renderer: RendererPtr,
         audio_renderer: RendererPtr,
+        wtm: RendererPtr,
         gui: *mut Gui,
         action_tx: Sender<c_bindings::GuiAction>,
     ) -> Self {
@@ -551,6 +557,7 @@ impl EframeImpl {
         Self {
             frame_renderer,
             audio_renderer,
+            wtm,
             action_tx,
             gui,
             progress_bar: ProgressBar {
@@ -595,6 +602,61 @@ impl eframe::App for EframeImpl {
 
             self.progress_bar
                 .show(ui, &state, &self.action_tx, self.audio_renderer.clone());
+        });
+
+        egui::SidePanel::right("script").show(ctx, |ui| unsafe {
+            let s = std::slice::from_raw_parts(state.text as *const u8, state.text_len as usize);
+            let s = std::str::from_utf8_unchecked(s);
+
+            let mut font_id = ui.style().text_styles[&egui::TextStyle::Body].clone();
+            font_id.size = 20.0;
+            let wrap_width = ui.available_width();
+
+            let layout = egui::text::LayoutJob::simple(
+                s.to_string(),
+                font_id,
+                ui.visuals().text_color(),
+                wrap_width,
+            );
+            let galley = ui.painter().layout_job(layout);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let response = ui.allocate_response(
+                    galley.rect.size(),
+                    egui::Sense {
+                        click: true,
+                        drag: false,
+                        focusable: false,
+                    },
+                );
+                ui.painter().galley(
+                    egui::pos2(response.rect.left(), response.rect.top()),
+                    Arc::clone(&galley),
+                    egui::Color32::WHITE,
+                );
+                if response.clicked() {
+                    let mut pixel_pos = response.interact_pointer_pos().unwrap();
+                    pixel_pos.y -= response.rect.top();
+                    pixel_pos.x -= response.rect.left();
+                    let mut row = 0;
+                    let mut col = 0;
+                    let mut char_pos = 0;
+
+                    while galley.rows[row].rect.bottom() < pixel_pos.y {
+                        char_pos += galley.rows[row].glyphs.len();
+                        row += 1;
+                    }
+
+                    while galley.rows[row].glyphs[col].pos.x + galley.rows[row].glyphs[col].size.x
+                        < pixel_pos.x
+                    {
+                        char_pos += 1;
+                        col += 1;
+                    }
+
+                    let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
+                    self.action_tx.send(gui_actions::seek(pts)).unwrap();
+                }
+            });
         });
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {

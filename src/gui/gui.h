@@ -9,6 +9,7 @@ typedef void AudioRenderer;
 typedef void GuiGl;
 typedef void Gui;
 typedef void AppState;
+typedef void WordTimestampMap;
 
 struct Clip {
     uint64_t id;
@@ -42,12 +43,14 @@ struct AppStateSnapshot {
     float total_runtime;
     const struct Clip* clips;
     uint64_t num_clips;
+    const char* text;
+    uint64_t text_len;
 };
 
 // GUI interface
 Gui* gui_init(AppState* state);
 void gui_free(Gui* gui);
-void gui_run(Gui* gui, FrameRenderer* frame_renderer, AudioRenderer* audio_renderer);
+void gui_run(Gui* gui, FrameRenderer* frame_renderer, AudioRenderer* audio_renderer, WordTimestampMap* wtm);
 struct GuiAction gui_next_action(Gui* gui);
 void gui_wait_start(Gui* gui);
 void gui_notify_update(Gui* gui);
@@ -98,6 +101,8 @@ void framerenderer_deinit_gl(FrameRenderer* renderer, GuiGl* guigl);
 void audiorenderer_init_gl(AudioRenderer* renderer, GuiGl* guigl);
 void audiorenderer_render(AudioRenderer* renderer, GuiGl* guigl, float zoom, float center_norm);
 void audiorenderer_deinit_gl(AudioRenderer* renderer, GuiGl* guigl);
+
+float wtm_get_time(WordTimestampMap* m, uint64_t char_pos);
 
 struct AppStateSnapshot appstate_snapshot(AppState* app);
 void appstate_deinit(AppState* app, const struct AppStateSnapshot* snapshot);

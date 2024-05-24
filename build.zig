@@ -11,6 +11,38 @@ fn prepareMiniaudio(b: *std.Build) std.Build.LazyPath {
     return ret;
 }
 
+fn setupWhisper(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    // Debug build of whisper is unreasonably slow. Create a library to allow
+    // us to always compile in release
+    //
+    // Bypass whisper build system for simplicity, if this becomes a problem we
+    // can always leverage theirs, but for now this seems like it integrates
+    // better with our project with no downsides
+    const lib = b.addStaticLibrary(.{
+        .name = "whisper",
+        .root_source_file = null,
+        .target = exe.root_module.resolved_target.?,
+        .optimize = std.builtin.OptimizeMode.ReleaseFast,
+    });
+    lib.linkLibC();
+    lib.linkLibCpp();
+
+    const whisper_files: []const []const u8 = &.{
+        "ggml.c", "ggml-alloc.c", "ggml-backend.c", "ggml-quants.c", "whisper.cpp",
+    };
+
+    for (whisper_files) |f| {
+        lib.addCSourceFile(.{ .file = b.path(b.pathJoin(&.{ "vendor/whisper.cpp", f })) });
+    }
+
+    if (exe.root_module.resolved_target.?.result.os.tag == .linux) {
+        lib.defineCMacro("_GNU_SOURCE", "");
+    }
+
+    exe.addIncludePath(b.path("vendor/whisper.cpp"));
+    exe.linkLibrary(lib);
+}
+
 fn setupRustGui(b: *std.Build, opt: std.builtin.OptimizeMode) !std.Build.LazyPath {
     const tool_run = b.addSystemCommand(&.{"cargo"});
     tool_run.setCwd(b.path("src/gui/rust"));
@@ -74,6 +106,8 @@ pub fn build(b: *std.Build) !void {
         exe.addLibraryPath(libgui_path.dirname());
         exe.linkSystemLibrary("gui");
     }
+
+    setupWhisper(b, exe);
 
     exe.addCSourceFile(.{ .file = b.path("src/miniaudio_impl.c") });
     exe.addIncludePath(b.path("src/gui"));

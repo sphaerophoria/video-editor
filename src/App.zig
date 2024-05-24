@@ -6,6 +6,7 @@ const ClipManager = @import("ClipManager.zig");
 const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
+const WordTimestampGenerator = @import("WordTimestampGenerator.zig");
 
 pub const AppRefs = struct {
     alloc: Allocator,
@@ -15,6 +16,7 @@ pub const AppRefs = struct {
     dec: *decoder.VideoDecoder,
     audio_player: ?*audio.Player,
     clip_manager: *ClipManager,
+    wtm: ?*WordTimestampGenerator,
 };
 
 const App = @This();
@@ -172,11 +174,15 @@ fn updateVideoFrame(self: *App, now: *std.time.Instant) !void {
 }
 
 fn updateAppState(self: *App) !void {
+    var text: []const u8 = &.{};
+    if (self.refs.wtm) |wtm| text = wtm.text;
+
     try self.refs.app_state.setSnapshot(.{
         .paused = self.player_state.isPaused(),
         .current_position = self.last_pts,
         .total_runtime = self.refs.dec.duration,
         .clips = self.refs.clip_manager.clips.items,
+        .text = text,
     });
 }
 
@@ -204,11 +210,18 @@ pub const AppState = struct {
         current_position: f32,
         total_runtime: f32,
         clips: []const c.Clip,
+        text: []const u8,
 
         fn clone(self: *const @This(), alloc: Allocator) !Snapshot {
             const new_clips = try alloc.dupe(c.Clip, self.clips);
+            errdefer alloc.free(new_clips);
+
+            const new_text = try alloc.dupe(u8, self.text);
+            errdefer alloc.free(new_text);
+
             var ret = self.*;
             ret.clips = new_clips;
+            ret.text = new_text;
             return ret;
         }
 
@@ -219,6 +232,8 @@ pub const AppState = struct {
                 .total_runtime = self.total_runtime,
                 .clips = self.clips.ptr,
                 .num_clips = self.clips.len,
+                .text = self.text.ptr,
+                .text_len = self.text.len,
             };
         }
 
@@ -228,11 +243,13 @@ pub const AppState = struct {
                 .current_position = c_repr.current_position,
                 .total_runtime = c_repr.total_runtime,
                 .clips = c_repr.clips[0..c_repr.num_clips],
+                .text = c_repr.text[0..c_repr.text_len],
             };
         }
 
         fn deinit(self: *@This(), alloc: Allocator) void {
             alloc.free(self.clips);
+            alloc.free(self.text);
         }
     };
 
@@ -245,6 +262,7 @@ pub const AppState = struct {
                 .current_position = 0.0,
                 .total_runtime = 0.0,
                 .clips = &.{},
+                .text = &.{},
             },
         };
     }

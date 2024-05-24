@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const c = @import("c.zig");
+const WordTimestampGenerator = @import("WordTimestampGenerator.zig");
 const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
@@ -16,10 +17,12 @@ const Args = struct {
     it: std.process.ArgIterator,
     input: [:0]const u8,
     output: [:0]const u8,
+    generate_subtitles: bool,
 
     const Switch = enum {
         @"--input",
         @"--output",
+        @"--skip-subtitles",
         @"--help",
 
         fn parse(s: []const u8) ?Switch {
@@ -42,6 +45,7 @@ const Args = struct {
 
         var input: ?[:0]const u8 = null;
         var output: ?[:0]const u8 = null;
+        var generate_subtitles: bool = true;
         const process_name = args.next() orelse "video-editor";
         while (args.next()) |arg| {
             const s = Switch.parse(arg) orelse {
@@ -62,6 +66,9 @@ const Args = struct {
                         help(process_name);
                     };
                 },
+                .@"--skip-subtitles" => {
+                    generate_subtitles = false;
+                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -78,6 +85,7 @@ const Args = struct {
                 print("output not provided\n", .{});
                 help(process_name);
             },
+            .generate_subtitles = generate_subtitles,
         };
     }
 
@@ -93,6 +101,9 @@ const Args = struct {
                 },
                 .@"--output" => {
                     print("Save file", .{});
+                },
+                .@"--skip-subtitles" => {
+                    print("Skip subtitle generation", .{});
                 },
                 .@"--help" => {
                     print("Show this help", .{});
@@ -174,6 +185,15 @@ pub fn main() !void {
     const audio_player = try makeAudioPlayer(alloc, &dec);
     defer if (audio_player) |p| p.deinit();
 
+    var wtm: ?WordTimestampGenerator = null;
+    if (args.generate_subtitles) {
+        wtm = try WordTimestampGenerator.init(alloc, args.input);
+    }
+    defer if (wtm) |*w| w.deinit();
+
+    var wtm_ptr: ?*WordTimestampGenerator = null;
+    if (wtm) |*w| wtm_ptr = w;
+
     const gui = c.gui_init(&app_state);
     defer c.gui_free(gui);
 
@@ -185,9 +205,10 @@ pub fn main() !void {
         .dec = &dec,
         .audio_player = audio_player,
         .clip_manager = &clip_manager,
+        .wtm = wtm_ptr,
     };
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{app_refs});
-    c.gui_run(gui, &frame_renderer, &audio_renderer);
+    c.gui_run(gui, &frame_renderer, &audio_renderer, wtm_ptr);
     main_loop_thread.join();
 }

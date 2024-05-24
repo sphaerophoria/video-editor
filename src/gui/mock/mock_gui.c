@@ -241,7 +241,8 @@ const struct TimedGuiAction kGuiActions[NUM_GUI_ACTIONS] = {
 };
 
 void gui_run(Gui* gui, FrameRenderer* frame_renderer,
-             AudioRenderer* audio_renderer) {
+             AudioRenderer* audio_renderer, WordTimestampMap* wtm) {
+  (void)wtm;
   struct GuiImpl* impl = gui;
   framerenderer_init_gl(frame_renderer, gui);
   audiorenderer_init_gl(audio_renderer, gui);
