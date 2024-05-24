@@ -378,8 +378,8 @@ pub const VideoDecoder = struct {
         errdefer channel_data.deinit();
 
         const nb_channels = try cIntToUsize(frame.ch_layout.nb_channels, "frame channels");
-        const data_len = try cIntToUsize(frame.linesize[0], "audio data length") / nb_channels;
         const nb_samples = try cIntToUsize(frame.nb_samples, "audio samples");
+        const data_len = nb_samples * format.sampleSize();
 
         for (0..nb_channels) |c_num| {
             const data_ptr = frame.extended_data[c_num];

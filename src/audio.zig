@@ -7,7 +7,7 @@ const AudioFrame = decoder.AudioFrame;
 pub const Format = enum {
     f32,
 
-    fn sampleSize(self: Format) usize {
+    pub fn sampleSize(self: Format) usize {
         switch (self) {
             .f32 => return 4,
         }
