@@ -16,6 +16,9 @@ struct Clip {
     float end;
 };
 
+struct Empty {
+};
+
 enum GuiActionTag {
     gui_action_none,
     gui_action_toggle_pause,
@@ -30,6 +33,7 @@ enum GuiActionTag {
 struct GuiAction {
     enum GuiActionTag tag;
     union {
+        struct Empty none;
         float seek_position;
         struct Clip clip;
         uint64_t id;
