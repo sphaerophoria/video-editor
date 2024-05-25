@@ -13,3 +13,9 @@ eframe = "0.27.2"
 
 [build-dependencies]
 bindgen = "0.65.1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+debug = 0
