@@ -89,6 +89,7 @@ pub const AudioFrame = struct {
     info: AudioStreamInfo,
     num_samples: usize,
     channel_data: std.ArrayList([]const u8),
+    pts: f32,
     frame_pool: *FramePool,
     frame_id: usize,
 
@@ -101,6 +102,13 @@ pub const AudioFrame = struct {
 pub const Frame = union(enum) {
     audio: AudioFrame,
     video: VideoFrame,
+
+    pub fn pts(self: *const Frame) f32 {
+        switch (self.*) {
+            .audio => |af| return af.pts,
+            .video => |vf| return vf.pts,
+        }
+    }
 
     pub fn deinit(self: *Frame) void {
         switch (self.*) {
@@ -311,9 +319,18 @@ pub const VideoDecoder = struct {
     pub fn seek(self: *VideoDecoder, pts: f32, stream_id: usize) VideoDecoderError!void {
         const time_base = self.fmt_ctx.streams[stream_id].*.time_base;
         const pts_tb = secondsToTimeBase(pts, time_base);
+        if (c.avformat_flush(self.fmt_ctx) < 0) {
+            std.log.err("Failed to flush ffmpeg context", .{});
+            return VideoDecoderError.InternalError;
+        }
+
         if (c.av_seek_frame(self.fmt_ctx, @intCast(stream_id), pts_tb, c.AVSEEK_FLAG_BACKWARD) < 0) {
             std.log.err("Failed to seek to {d}", .{pts});
             return VideoDecoderError.InvalidArg;
+        }
+
+        for (self.decoder_ctxs.items) |decoder_ctx| {
+            c.avcodec_flush_buffers(decoder_ctx);
         }
     }
 
@@ -386,6 +403,9 @@ pub const VideoDecoder = struct {
             try channel_data.append(data_ptr[0..data_len]);
         }
 
+        const time_base = self.fmt_ctx.streams[@intCast(self.packet.stream_index)].*.time_base;
+        const pts = timeBaseToSeconds(frame.pts, time_base);
+
         std.debug.assert(self.packet.stream_index >= 0); // Should have been checked in parent function
 
         return .{
@@ -396,6 +416,7 @@ pub const VideoDecoder = struct {
                     .sample_rate = @intCast(frame.sample_rate),
                     .num_channels = channel_data.items.len,
                 },
+                .pts = pts,
                 .num_samples = nb_samples,
                 .channel_data = channel_data,
                 .frame_pool = &self.frame_pool,

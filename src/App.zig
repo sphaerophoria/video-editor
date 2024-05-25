@@ -43,24 +43,24 @@ pub fn run(self: *App) !void {
     if (self.refs.audio_player) |p| try p.start();
 
     while (true) {
-        const now = try std.time.Instant.now();
+        var now = try std.time.Instant.now();
 
-        if (try self.applyGuiActions(now)) {
+        if (try self.applyGuiActions(&now)) {
             break;
         }
-        try self.updateVideoFrame(now);
+        try self.updateVideoFrame(&now);
         try self.updateAppState();
         try self.sleepUntilNextFrame();
     }
 }
 
-fn applyGuiActions(self: *App, now: std.time.Instant) !bool {
+fn applyGuiActions(self: *App, now: *std.time.Instant) !bool {
     var seek_position: ?f32 = null;
     while (true) {
         const action = c.gui_next_action(self.refs.gui);
         switch (action.tag) {
             c.gui_action_toggle_pause => {
-                self.player_state.togglePause(now);
+                self.player_state.togglePause(now.*);
                 c.gui_notify_update(self.refs.gui);
             },
             c.gui_action_none => {
@@ -109,39 +109,44 @@ fn setEndOfVideo(self: *App, now: std.time.Instant) void {
     c.gui_notify_update(self.refs.gui);
 }
 
-fn seekToPts(self: *App, now: std.time.Instant, pts: f32) !void {
+fn seekToPts(self: *App, now: *std.time.Instant, pts: f32) !void {
     try self.refs.dec.seek(pts, self.stream_id);
 
     var img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
-        self.setEndOfVideo(now);
+        self.setEndOfVideo(now.*);
         return;
     };
 
+    self.last_pts = img.pts;
+
     while (true) {
         const new_img = try getNextVideoFrame(self.refs.dec, null, self.stream_id) orelse {
-            self.setEndOfVideo(now);
+            self.setEndOfVideo(now.*);
             break;
         };
         img.deinit();
         img = new_img;
 
+        //std.debug.print("set last pts to {d}\n", .{new_img.pts});
         self.last_pts = new_img.pts;
 
         if (self.last_pts >= pts) {
             break;
         }
     }
-    self.player_state.seek(now, self.last_pts);
+
+    now.* = try std.time.Instant.now();
+    self.player_state.seek(now.*, self.last_pts);
     self.refs.frame_renderer.swapFrame(img);
     c.gui_notify_update(self.refs.gui);
 }
 
-fn updateVideoFrame(self: *App, now: std.time.Instant) !void {
+fn updateVideoFrame(self: *App, now: *std.time.Instant) !void {
     const clip_for_pts = self.refs.clip_manager.clipForPts(self.last_pts);
 
-    while (self.player_state.shouldUpdateFrame(now, self.last_pts)) {
+    while (self.player_state.shouldUpdateFrame(now.*, self.last_pts)) {
         var new_img = try getNextVideoFrame(self.refs.dec, self.refs.audio_player, self.stream_id) orelse {
-            self.setEndOfVideo(now);
+            self.setEndOfVideo(now.*);
             break;
         };
 
@@ -152,7 +157,7 @@ fn updateVideoFrame(self: *App, now: std.time.Instant) !void {
                 if (self.refs.clip_manager.nextClip(cl.id)) |next_clip| {
                     try self.seekToPts(now, next_clip.start);
                 } else {
-                    self.player_state.pause(now);
+                    self.player_state.pause(now.*);
                 }
 
                 c.gui_notify_update(self.refs.gui);
