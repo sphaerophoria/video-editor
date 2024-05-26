@@ -651,50 +651,58 @@ impl eframe::App for EframeImpl {
                 wrap_width,
             );
             let galley = ui.painter().layout_job(layout);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let response = ui.allocate_response(
-                    galley.rect.size(),
-                    egui::Sense {
-                        click: false,
-                        drag: true,
-                        focusable: false,
-                    },
-                );
-                ui.painter().galley(
-                    egui::pos2(response.rect.left(), response.rect.top()),
-                    Arc::clone(&galley),
-                    egui::Color32::WHITE,
-                );
+            egui::ScrollArea::vertical()
+                .drag_to_scroll(false)
+                .show(ui, |ui| {
+                    let response = ui.allocate_response(
+                        galley.rect.size(),
+                        egui::Sense {
+                            click: false,
+                            drag: true,
+                            focusable: false,
+                        },
+                    );
+                    ui.painter().galley(
+                        egui::pos2(response.rect.left(), response.rect.top()),
+                        Arc::clone(&galley),
+                        egui::Color32::WHITE,
+                    );
 
-                if self.seek_state.should_toggle_pause(&response, &state) {
-                    self.action_tx.send(gui_actions::toggle_pause()).unwrap();
-                }
-
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    let mut pixel_pos = response.interact_pointer_pos().unwrap();
-                    pixel_pos.y -= response.rect.top();
-                    pixel_pos.x -= response.rect.left();
-                    let mut row = 0;
-                    let mut col = 0;
-                    let mut char_pos = 0;
-
-                    while row < galley.rows.len() && galley.rows[row].rect.bottom() < pixel_pos.y {
-                        char_pos += galley.rows[row].glyphs.len();
-                        row += 1;
-                    }
-                    row = row.min(galley.rows.len() - 1);
-
-                    let glyphs = &galley.rows[row].glyphs;
-                    while col < glyphs.len() && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
-                    {
-                        char_pos += 1;
-                        col += 1;
+                    if self.seek_state.should_toggle_pause(&response, &state) {
+                        self.action_tx.send(gui_actions::toggle_pause()).unwrap();
                     }
 
-                    let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
-                    self.action_tx.send(gui_actions::seek(pts)).unwrap();
-                }
-            });
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        let mut pixel_pos = response.interact_pointer_pos().unwrap();
+                        pixel_pos.y -= response.rect.top();
+                        pixel_pos.x -= response.rect.left();
+                        let mut row = 0;
+                        let mut col = 0;
+                        let mut char_pos = 0;
+
+                        while row < galley.rows.len()
+                            && galley.rows[row].rect.bottom() < pixel_pos.y
+                        {
+                            char_pos += galley.rows[row].glyphs.len();
+                            row += 1;
+                        }
+                        // I want B to be no larger then A
+                        // The maximum value of B is A
+                        // max(a, b)
+                        row = row.min(galley.rows.len() - 1);
+
+                        let glyphs = &galley.rows[row].glyphs;
+                        while col < glyphs.len()
+                            && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
+                        {
+                            char_pos += 1;
+                            col += 1;
+                        }
+
+                        let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
+                        self.action_tx.send(gui_actions::seek(pts)).unwrap();
+                    }
+                });
         });
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {

@@ -6,6 +6,7 @@ const ClipManager = @import("ClipManager.zig");
 const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
+const save_mod = @import("save.zig");
 const WordTimestampGenerator = @import("WordTimestampGenerator.zig");
 
 pub const AppRefs = struct {
@@ -17,6 +18,7 @@ pub const AppRefs = struct {
     audio_player: ?*audio.Player,
     clip_manager: *ClipManager,
     wtm: ?*WordTimestampGenerator,
+    save_path: []const u8,
 };
 
 const App = @This();
@@ -32,6 +34,13 @@ pub fn init(refs: AppRefs) !App {
         return error.InvalidData;
     };
     refs.frame_renderer.swapFrame(img);
+
+    // Open as write to ensure that we have write permissions for later
+    const f = try std.fs.cwd().createFile(refs.save_path, .{
+        .read = true,
+        .truncate = false,
+    });
+    defer f.close();
 
     return .{
         .refs = refs,
@@ -90,7 +99,7 @@ fn applyGuiActions(self: *App, now: *std.time.Instant) !bool {
                 c.gui_notify_update(self.refs.gui);
             },
             c.gui_action_save => {
-                try self.refs.clip_manager.save();
+                try Save.save(self.refs);
             },
             else => {
                 std.debug.panic("invalid action: {d}", .{action.tag});
@@ -409,3 +418,57 @@ fn getNextVideoFrame(dec: *decoder.VideoDecoder, audio_player: ?*audio.Player, s
         }
     }
 }
+
+pub const Save = struct {
+    data: ?save_mod.Data,
+
+    const clip_key = "clips";
+    const wtm_key = "script_generator";
+
+    pub fn load(alloc: Allocator, path: []const u8) Save {
+        if (save_mod.Data.load(alloc, path)) |sd| {
+            return .{
+                .data = sd,
+            };
+        } else |e| {
+            std.log.err("Failed to load save: {any}", .{e});
+            return .{
+                .data = null,
+            };
+        }
+    }
+
+    pub fn deinit(self: *const Save) void {
+        if (self.data) |sd| sd.deinit();
+    }
+    pub fn clips(self: *Save) ?save_mod.Data.Field {
+        return self.getField(clip_key);
+    }
+
+    pub fn wordTimestampMap(self: *Save) ?save_mod.Data.Field {
+        return self.getField(wtm_key);
+    }
+
+    fn getField(self: *Save, key: []const u8) ?save_mod.Data.Field {
+        if (self.data == null) {
+            return null;
+        }
+
+        return self.data.?.field(key);
+    }
+
+    fn save(refs: AppRefs) !void {
+        var save_writer = try save_mod.Writer.init(refs.save_path);
+
+        try refs.clip_manager.serialize(try save_writer.field(clip_key));
+
+        const wtm_field = try save_writer.field(wtm_key);
+        if (refs.wtm) |wtm| {
+            try wtm.serialize(wtm_field);
+        } else {
+            try wtm_field.write(null);
+        }
+
+        try save_writer.finish();
+    }
+};

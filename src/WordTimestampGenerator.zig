@@ -2,6 +2,7 @@ const c = @import("c.zig");
 const decoder = @import("decoder.zig");
 const std = @import("std");
 const audio = @import("audio.zig");
+const save = @import("save.zig");
 const Allocator = std.mem.Allocator;
 const Thread = std.Thread;
 const Mutex = Thread.Mutex;
@@ -21,6 +22,7 @@ const Shared = struct {
     mutex: Mutex,
     segments: std.ArrayList(SegmentBounds),
     text: std.ArrayList(u8),
+    num_samples_processed: usize,
 
     // No mutex lock necessary
     shutdown: std.atomic.Value(bool),
@@ -212,17 +214,22 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
     var sampler = try WhisperInputResampler.init(&dec);
     defer sampler.deinit();
 
+    for (shared.num_samples_processed) |_| {
+        _ = try sampler.next();
+    }
+
     c.whisper_log_set(logCallback, null);
 
     const sample_size = sampler.stream.format.sampleSize();
     const buf_size_s = 8;
-    var audio_buf = try alloc.alloc(u8, 16000 * buf_size_s * sample_size);
+    var audio_buf = try alloc.alloc(u8, whisper_sample_rate * buf_size_s * sample_size);
     defer alloc.free(audio_buf);
 
     var buf_pos: usize = 0;
 
     var whisper = try WhisperRunner.init(&shared.shutdown);
     defer whisper.deinit();
+    whisper.start_time_ms = @divTrunc(@as(i64, @intCast(shared.num_samples_processed)) * 1000, whisper_sample_rate);
 
     while (!shared.shutdown.load(std.builtin.AtomicOrder.unordered)) {
         const data = try sampler.next() orelse {
@@ -254,6 +261,7 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
                 try shared.text.appendSlice(sample.text);
             }
 
+            shared.num_samples_processed += buf_size_s * whisper_sample_rate;
             buf_pos = 0;
         }
     }
@@ -276,7 +284,7 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
     }
 }
 
-pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
+pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field) !Whisper {
     var segments = std.ArrayList(SegmentBounds).init(alloc);
     errdefer segments.deinit();
 
@@ -285,13 +293,7 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
 
     const shared = try alloc.create(Shared);
     errdefer alloc.destroy(shared);
-
-    shared.* = .{
-        .mutex = .{},
-        .segments = segments,
-        .text = text,
-        .shutdown = std.atomic.Value(bool).init(false),
-    };
+    shared.* = try sharedFromInitData(alloc, init_data);
 
     const init_thread = try Thread.spawn(.{}, initThread, .{ alloc, path, shared });
 
@@ -307,6 +309,56 @@ pub fn deinit(self: *Whisper) void {
     self.init_thread.join();
     self.shared.deinit();
     self.alloc.destroy(self.shared);
+}
+
+pub const SaveData = struct {
+    text: []const u8,
+    segment_timestamps: []const SegmentBounds,
+    num_samples_processed: usize,
+};
+
+pub fn serialize(self: *Whisper, writer: save.Writer.FieldWriter) !void {
+    self.shared.mutex.lock();
+    defer self.shared.mutex.unlock();
+
+    const data = SaveData{
+        .text = self.shared.text.items,
+        .segment_timestamps = self.shared.segments.items,
+        .num_samples_processed = self.shared.num_samples_processed,
+    };
+    try writer.write(data);
+}
+
+fn sharedFromInitData(alloc: Allocator, init_data: ?save.Data.Field) !Shared {
+    var segments = std.ArrayList(SegmentBounds).init(alloc);
+    errdefer segments.deinit();
+
+    var text = std.ArrayList(u8).init(alloc);
+    errdefer text.deinit();
+
+    if (init_data == null) {
+        return Shared{
+            .mutex = .{},
+            .segments = segments,
+            .text = text,
+            .shutdown = std.atomic.Value(bool).init(false),
+            .num_samples_processed = 0,
+        };
+    }
+
+    const parsed = try init_data.?.as(SaveData);
+    defer parsed.deinit();
+
+    try segments.appendSlice(parsed.value.segment_timestamps);
+    try text.appendSlice(parsed.value.text);
+
+    return Shared{
+        .mutex = .{},
+        .segments = segments,
+        .text = text,
+        .shutdown = std.atomic.Value(bool).init(false),
+        .num_samples_processed = parsed.value.num_samples_processed,
+    };
 }
 
 pub export fn wtm_get_time(m: *Whisper, char_pos: u64) f32 {

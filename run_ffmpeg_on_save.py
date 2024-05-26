@@ -35,7 +35,7 @@ def main(video_path, save_file_path):
 
 
     generator = FfmpegFilterGenerator(video_path)
-    for segment in save_file:
+    for segment in save_file["clips"]:
         generator.add_segment(segment["start"], segment["end"])
     generator.finish("out.mkv")
 

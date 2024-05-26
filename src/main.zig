@@ -7,6 +7,7 @@ const WordTimestampGenerator = @import("WordTimestampGenerator.zig");
 const FrameRenderer = @import("FrameRenderer.zig");
 const decoder = @import("decoder.zig");
 const audio = @import("audio.zig");
+const save = @import("save.zig");
 const App = @import("App.zig");
 const AudioRenderer = @import("AudioRenderer.zig");
 const ClipManager = @import("ClipManager.zig");
@@ -179,7 +180,10 @@ pub fn main() !void {
     var app_state = App.AppState.init(alloc);
     defer app_state.deinit();
 
-    var clip_manager = try ClipManager.init(alloc, args.output);
+    var save_data = App.Save.load(alloc, args.output);
+    defer save_data.deinit();
+
+    var clip_manager = try ClipManager.init(alloc, save_data.clips());
     defer clip_manager.deinit();
 
     const audio_player = try makeAudioPlayer(alloc, &dec);
@@ -187,7 +191,7 @@ pub fn main() !void {
 
     var wtm: ?WordTimestampGenerator = null;
     if (args.generate_subtitles) {
-        wtm = try WordTimestampGenerator.init(alloc, args.input);
+        wtm = try WordTimestampGenerator.init(alloc, args.input, save_data.wordTimestampMap());
     }
     defer if (wtm) |*w| w.deinit();
 
@@ -206,6 +210,7 @@ pub fn main() !void {
         .audio_player = audio_player,
         .clip_manager = &clip_manager,
         .wtm = wtm_ptr,
+        .save_path = args.output,
     };
 
     const main_loop_thread = try std.Thread.spawn(.{}, main_loop, .{app_refs});

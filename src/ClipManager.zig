@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig");
 const decoder = @import("decoder.zig");
+const save = @import("save.zig");
 const VideoDecoder = decoder.VideoDecoder;
 
 const Allocator = std.mem.Allocator;
@@ -9,90 +10,8 @@ const ClipList = std.ArrayList(c.Clip);
 
 clips: ClipList,
 clip_id: usize,
-save_path: []const u8,
 
 const ClipManager = @This();
-
-fn getItemAsU64(map: std.json.ObjectMap, key: []const u8) !u64 {
-    const value = map.get(key) orelse {
-        std.log.err("{s} key not present on clip", .{key});
-        return error.InvalidSave;
-    };
-
-    switch (value) {
-        .integer => |i| {
-            return std.math.cast(u64, i) orelse {
-                std.log.err("id is not a valid u64", .{});
-                return error.InvalidSave;
-            };
-        },
-        else => {
-            std.log.err("id is not an integer", .{});
-            return error.InvalidSave;
-        },
-    }
-}
-
-fn getItemAsFloat(map: std.json.ObjectMap, key: []const u8) !f32 {
-    const value = map.get(key) orelse {
-        std.log.err("{s} key not present on clip", .{key});
-        return error.InvalidSave;
-    };
-
-    switch (value) {
-        .float => |f| {
-            return @floatCast(f);
-        },
-        else => {
-            std.log.err("id is not an float", .{});
-            return error.InvalidSave;
-        },
-    }
-}
-
-fn parseClipsJson(alloc: Allocator, file_reader: std.io.AnyReader) !ClipList {
-    var clips = ClipList.init(alloc);
-    errdefer clips.deinit();
-
-    var reader = std.json.reader(alloc, file_reader);
-    defer reader.deinit();
-
-    var root = try std.json.parseFromTokenSource(std.json.Value, alloc, &reader, .{});
-    defer root.deinit();
-
-    var root_arr: std.json.Array = undefined;
-    switch (root.value) {
-        .array => |a| {
-            root_arr = a;
-        },
-        else => {
-            std.log.err("Save file expected to be array\n", .{});
-            return error.InvalidSave;
-        },
-    }
-
-    for (root_arr.items) |item| {
-        var item_obj: std.json.ObjectMap = undefined;
-        switch (item) {
-            .object => |o| item_obj = o,
-            else => {
-                std.log.err("Clips expected to be objects", .{});
-                return error.InvalidSave;
-            },
-        }
-
-        const id = try getItemAsU64(item_obj, "id");
-        const start = try getItemAsFloat(item_obj, "start");
-        const end = try getItemAsFloat(item_obj, "end");
-        try clips.append(.{
-            .id = id,
-            .start = start,
-            .end = end,
-        });
-    }
-
-    return clips;
-}
 
 fn maxClipId(clips: []const c.Clip) usize {
     var ret: usize = 0;
@@ -104,20 +23,13 @@ fn maxClipId(clips: []const c.Clip) usize {
     return ret;
 }
 
-pub fn init(alloc: Allocator, save_path: []const u8) !ClipManager {
-    // Open as write to ensure that we have write permissions for later
-    const f = try std.fs.cwd().createFile(save_path, .{
-        .read = true,
-        .truncate = false,
-    });
-    defer f.close();
+pub fn init(alloc: Allocator, init_data: ?save.Data.Field) !ClipManager {
+    var clips = ClipList.init(alloc);
+    if (init_data) |id| {
+        const loaded = try id.as([]const c.Clip);
+        defer loaded.deinit();
 
-    var clips: ClipList = undefined;
-    if (parseClipsJson(alloc, f.reader().any())) |cl| {
-        clips = cl;
-    } else |e| {
-        std.log.err("Failed to parse save file: {any}", .{e});
-        clips = ClipList.init(alloc);
+        try clips.appendSlice(loaded.value);
     }
 
     const clip_id = maxClipId(clips.items) + 1;
@@ -125,7 +37,6 @@ pub fn init(alloc: Allocator, save_path: []const u8) !ClipManager {
     return .{
         .clips = clips,
         .clip_id = clip_id,
-        .save_path = save_path,
     };
 }
 
@@ -133,27 +44,15 @@ pub fn deinit(self: *ClipManager) void {
     self.clips.deinit();
 }
 
-pub fn save(self: *ClipManager) !void {
-    const f = try std.fs.cwd().createFile(self.save_path, .{});
-    defer f.close();
+pub fn serialize(self: *ClipManager, writer: anytype) !void {
+    const lessThanWithContext = struct {
+        fn f(_: void, lhs: c.Clip, rhs: c.Clip) bool {
+            return lessThan(lhs, rhs);
+        }
+    }.f;
 
-    var output = std.json.writeStream(f.writer(), .{
-        .whitespace = .indent_2,
-    });
-
-    try output.beginArray();
-    var clip = self.firstClip() orelse {
-        try output.endArray();
-        return;
-    };
-
-    try writeClip(clip, &output);
-    while (self.nextClip(clip.id)) |next_clip| {
-        clip = next_clip;
-        try writeClip(clip, &output);
-    }
-
-    try output.endArray();
+    std.mem.sort(c.Clip, self.clips.items, {}, lessThanWithContext);
+    try writer.write(self.clips.items);
 }
 
 fn writeClip(clip: c.Clip, output: anytype) !void {
