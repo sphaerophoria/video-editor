@@ -181,6 +181,41 @@ pub unsafe extern "C" fn gui_close(gui: *mut Gui) {
     }
 }
 
+struct SeekState {
+    paused_on_click: bool,
+}
+
+impl SeekState {
+    fn should_toggle_pause(
+        &mut self,
+        response: &egui::Response,
+        state: &c_bindings::AppStateSnapshot,
+    ) -> bool {
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            self.paused_on_click = state.paused;
+            if !state.paused {
+                return true;
+            }
+        }
+
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            // You may think we should check the current state here, but that is untrue. When we
+            // execute a seek, we may not finish the seek before the next render frame in the UI.
+            // Because of this we may not see the applied pause yet. If we manage to check this
+            // condition before the pause is applied, we will not correctly unpause orselves.
+            //
+            // The failure condition here is if we somehow change the pause state while we are
+            // seeking (i.e. pressing spacebar), in this case we may end up with an extra toggle
+            // that we didn't want, but that's a fine tradeoff here
+            && !self.paused_on_click
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
 struct ClipTimelineRenderer<'a> {
     converter: &'a ProgressPosConverter,
     ui: &'a mut egui::Ui,
@@ -190,7 +225,7 @@ struct ClipTimelineRenderer<'a> {
 }
 
 impl ClipTimelineRenderer<'_> {
-    fn render_clip(&mut self, clip: &c_bindings::Clip) {
+    fn render_clip(&mut self, clip: &c_bindings::Clip, seek_state: &mut SeekState) {
         let mut edited_clip = *clip;
 
         let mut changed = false;
@@ -208,6 +243,7 @@ impl ClipTimelineRenderer<'_> {
             &start_response,
             self.state,
             self.action_tx,
+            seek_state,
         ) {
             changed = true;
             edited_clip.start = pos;
@@ -215,10 +251,13 @@ impl ClipTimelineRenderer<'_> {
 
         let end_rect = self.converter.duration_to_full_rect(clip.end, 2.0);
         let end_response = self.ui.allocate_rect(end_rect, sense);
-        if let Some(pos) =
-            self.progress_bar
-                .handle_seek(self.converter, &end_response, self.state, self.action_tx)
-        {
+        if let Some(pos) = self.progress_bar.handle_seek(
+            self.converter,
+            &end_response,
+            self.state,
+            self.action_tx,
+            seek_state,
+        ) {
             changed = true;
             edited_clip.end = pos;
         }
@@ -281,7 +320,6 @@ impl ProgressPosConverter {
 }
 
 struct ProgressBar {
-    paused_on_click: bool,
     zoom: f32,
     widget_center_norm: f32,
     pending_clip: Option<c_bindings::Clip>,
@@ -328,6 +366,7 @@ impl ProgressBar {
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
+        seek_state: &mut SeekState,
     ) -> Option<f32> {
         let mut ret = None;
 
@@ -340,24 +379,7 @@ impl ProgressBar {
             ret = Some(duration_pos);
         }
 
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            self.paused_on_click = state.paused;
-            if !state.paused {
-                action_tx.send(gui_actions::toggle_pause()).unwrap();
-            }
-        }
-
-        if response.drag_stopped_by(egui::PointerButton::Primary)
-            // You may think we should check the current state here, but that is untrue. When we
-            // execute a seek, we may not finish the seek before the next render frame in the UI.
-            // Because of this we may not see the applied pause yet. If we manage to check this
-            // condition before the pause is applied, we will not correctly unpause orselves.
-            //
-            // The failure condition here is if we somehow change the pause state while we are
-            // seeking (i.e. pressing spacebar), in this case we may end up with an extra toggle
-            // that we didn't want, but that's a fine tradeoff here
-            && !self.paused_on_click
-        {
+        if seek_state.should_toggle_pause(response, state) {
             action_tx.send(gui_actions::toggle_pause()).unwrap();
         }
 
@@ -419,9 +441,10 @@ impl ProgressBar {
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
         action_tx: &Sender<c_bindings::GuiAction>,
+        seek_state: &mut SeekState,
     ) {
         self.handle_clip_creation(converter, ui, response, action_tx);
-        self.handle_seek(converter, response, state, action_tx);
+        self.handle_seek(converter, response, state, action_tx, seek_state);
         self.handle_pan(ui, response);
         self.handle_zoom(converter, ui, response);
         self.clamp_widget_center();
@@ -433,6 +456,7 @@ impl ProgressBar {
         state: &SnapshotHolder,
         action_tx: &Sender<c_bindings::GuiAction>,
         audio_renderer: RendererPtr,
+        seek_state: &mut SeekState,
     ) {
         ui.with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
             let response = ui.allocate_response(
@@ -482,18 +506,18 @@ impl ProgressBar {
 
             for i in 0..state.num_clips {
                 let clip = unsafe { *state.clips.add(i as usize) };
-                clip_renderer.render_clip(&clip);
+                clip_renderer.render_clip(&clip, seek_state);
             }
 
             if let Some(pending_clip) = pending_clip {
-                clip_renderer.render_clip(&pending_clip)
+                clip_renderer.render_clip(&pending_clip, seek_state)
             }
 
             let progress_rect = converter.duration_to_full_rect(state.current_position, 3.0);
             ui.painter()
                 .rect_filled(progress_rect, 0.0, egui::Color32::YELLOW);
 
-            self.handle_response(&converter, ui, &response, state, action_tx);
+            self.handle_response(&converter, ui, &response, state, action_tx, seek_state);
         });
     }
 }
@@ -533,6 +557,7 @@ struct EframeImpl {
     action_tx: Sender<c_bindings::GuiAction>,
     gui: *mut Gui,
     progress_bar: ProgressBar,
+    seek_state: SeekState,
 }
 
 impl EframeImpl {
@@ -561,10 +586,12 @@ impl EframeImpl {
             action_tx,
             gui,
             progress_bar: ProgressBar {
-                paused_on_click: false,
                 zoom: 1.0,
                 widget_center_norm: 0.5,
                 pending_clip: None,
+            },
+            seek_state: SeekState {
+                paused_on_click: false,
             },
         }
     }
@@ -600,8 +627,13 @@ impl eframe::App for EframeImpl {
                 }
             });
 
-            self.progress_bar
-                .show(ui, &state, &self.action_tx, self.audio_renderer.clone());
+            self.progress_bar.show(
+                ui,
+                &state,
+                &self.action_tx,
+                self.audio_renderer.clone(),
+                &mut self.seek_state,
+            );
         });
 
         egui::SidePanel::right("script").show(ctx, |ui| unsafe {
@@ -623,8 +655,8 @@ impl eframe::App for EframeImpl {
                 let response = ui.allocate_response(
                     galley.rect.size(),
                     egui::Sense {
-                        click: true,
-                        drag: false,
+                        click: false,
+                        drag: true,
                         focusable: false,
                     },
                 );
@@ -634,7 +666,11 @@ impl eframe::App for EframeImpl {
                     egui::Color32::WHITE,
                 );
 
-                if response.clicked() {
+                if self.seek_state.should_toggle_pause(&response, &state) {
+                    self.action_tx.send(gui_actions::toggle_pause()).unwrap();
+                }
+
+                if response.dragged_by(egui::PointerButton::Primary) {
                     let mut pixel_pos = response.interact_pointer_pos().unwrap();
                     pixel_pos.y -= response.rect.top();
                     pixel_pos.x -= response.rect.left();
