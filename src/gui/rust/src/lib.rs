@@ -633,6 +633,7 @@ impl eframe::App for EframeImpl {
                     Arc::clone(&galley),
                     egui::Color32::WHITE,
                 );
+
                 if response.clicked() {
                     let mut pixel_pos = response.interact_pointer_pos().unwrap();
                     pixel_pos.y -= response.rect.top();
@@ -641,13 +642,14 @@ impl eframe::App for EframeImpl {
                     let mut col = 0;
                     let mut char_pos = 0;
 
-                    while galley.rows[row].rect.bottom() < pixel_pos.y {
+                    while row < galley.rows.len() && galley.rows[row].rect.bottom() < pixel_pos.y {
                         char_pos += galley.rows[row].glyphs.len();
                         row += 1;
                     }
+                    row = row.max(galley.rows.len() - 1);
 
-                    while galley.rows[row].glyphs[col].pos.x + galley.rows[row].glyphs[col].size.x
-                        < pixel_pos.x
+                    let glyphs = &galley.rows[row].glyphs;
+                    while col < glyphs.len() && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
                     {
                         char_pos += 1;
                         col += 1;
