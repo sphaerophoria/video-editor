@@ -65,7 +65,6 @@ const WhisperInputResampler = struct {
     frame: decoder.AudioFrame,
     frame_start: usize,
     output_samples: usize,
-    multiplier: f32,
 
     fn init(dec: *decoder.VideoDecoder) !WhisperInputResampler {
         const stream = try findFirstAudioStream(dec) orelse {
@@ -77,15 +76,12 @@ const WhisperInputResampler = struct {
             return error.NoAudio;
         };
 
-        var multiplier: f32 = @floatFromInt(stream.sample_rate);
-        multiplier /= whisper_sample_rate;
         return .{
             .stream = stream,
             .dec = dec,
             .frame = frame.audio,
             .frame_start = 0,
             .output_samples = 0,
-            .multiplier = multiplier,
         };
     }
 
@@ -96,8 +92,8 @@ const WhisperInputResampler = struct {
     // Returns the next sample at the requested rate
     fn next(self: *WhisperInputResampler) !?[]const u8 {
         while (true) {
-            const input_idx = @as(f32, @floatFromInt(self.output_samples)) * self.multiplier;
-            const frame_idx = @as(usize, @intFromFloat(input_idx)) - self.frame_start;
+            const input_idx = self.output_samples * self.stream.sample_rate / whisper_sample_rate;
+            const frame_idx = input_idx - self.frame_start;
 
             if (frame_idx >= self.frame.num_samples) {
                 const frame = try self.dec.next(self.stream.stream_id) orelse {
