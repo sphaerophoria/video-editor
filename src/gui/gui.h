@@ -45,6 +45,8 @@ struct AppStateSnapshot {
     uint64_t num_clips;
     const char* text;
     uint64_t text_len;
+    const uint64_t* text_split_indices;
+    uint64_t text_split_indices_len;
 };
 
 // GUI interface

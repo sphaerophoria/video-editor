@@ -191,12 +191,16 @@ fn updateAppState(self: *App) !void {
     var text: []const u8 = &.{};
     if (self.refs.wtm) |wtm| text = wtm.shared.text.items;
 
+    var text_split_indices: []const u64 = &.{};
+    if (self.refs.wtm) |wtm| text_split_indices = wtm.shared.split_indices.items;
+
     try self.refs.app_state.setSnapshot(.{
         .paused = self.player_state.isPaused(),
         .current_position = self.last_pts,
         .total_runtime = self.refs.dec.duration,
         .clips = self.refs.clip_manager.clips.items,
         .text = text,
+        .text_split_indices = text_split_indices,
     });
 }
 
@@ -225,6 +229,7 @@ pub const AppState = struct {
         total_runtime: f32,
         clips: []const c.Clip,
         text: []const u8,
+        text_split_indices: []const u64,
 
         fn clone(self: *const @This(), alloc: Allocator) !Snapshot {
             const new_clips = try alloc.dupe(c.Clip, self.clips);
@@ -233,9 +238,13 @@ pub const AppState = struct {
             const new_text = try alloc.dupe(u8, self.text);
             errdefer alloc.free(new_text);
 
+            const text_split_indices = try alloc.dupe(u64, self.text_split_indices);
+            errdefer alloc.free(text_split_indices);
+
             var ret = self.*;
             ret.clips = new_clips;
             ret.text = new_text;
+            ret.text_split_indices = text_split_indices;
             return ret;
         }
 
@@ -248,6 +257,8 @@ pub const AppState = struct {
                 .num_clips = self.clips.len,
                 .text = self.text.ptr,
                 .text_len = self.text.len,
+                .text_split_indices = self.text_split_indices.ptr,
+                .text_split_indices_len = self.text_split_indices.len,
             };
         }
 
@@ -258,12 +269,14 @@ pub const AppState = struct {
                 .total_runtime = c_repr.total_runtime,
                 .clips = c_repr.clips[0..c_repr.num_clips],
                 .text = c_repr.text[0..c_repr.text_len],
+                .text_split_indices = c_repr.text_split_indices[0..c_repr.text_split_indices_len],
             };
         }
 
         fn deinit(self: *@This(), alloc: Allocator) void {
             alloc.free(self.clips);
             alloc.free(self.text);
+            alloc.free(self.text_split_indices);
         }
     };
 
@@ -277,6 +290,7 @@ pub const AppState = struct {
                 .total_runtime = 0.0,
                 .clips = &.{},
                 .text = &.{},
+                .text_split_indices = &.{},
             },
         };
     }

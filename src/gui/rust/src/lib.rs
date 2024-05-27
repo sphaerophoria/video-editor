@@ -644,63 +644,89 @@ impl eframe::App for EframeImpl {
             font_id.size = 20.0;
             let wrap_width = ui.available_width();
 
+            let mut galleys = Vec::new();
+            // [ 5, 10, 15]
+            let mut last_idx = 0;
+            for i in 0..state.text_split_indices_len {
+                let i: usize = i.try_into().unwrap();
+                let text_idx = (*state.text_split_indices.add(i)).try_into().unwrap();
+
+                let layout = egui::text::LayoutJob::simple(
+                    s[last_idx..text_idx].to_string(),
+                    font_id.clone(),
+                    ui.visuals().text_color(),
+                    wrap_width,
+                );
+
+                galleys.push((ui.painter().layout_job(layout), last_idx));
+                last_idx = text_idx;
+            }
+
             let layout = egui::text::LayoutJob::simple(
-                s.to_string(),
-                font_id,
+                s[last_idx..s.len()].to_string(),
+                font_id.clone(),
                 ui.visuals().text_color(),
                 wrap_width,
             );
-            let galley = ui.painter().layout_job(layout);
+
+            galleys.push((ui.painter().layout_job(layout), last_idx));
+
             egui::ScrollArea::vertical()
                 .drag_to_scroll(false)
                 .show(ui, |ui| {
-                    let response = ui.allocate_response(
-                        galley.rect.size(),
-                        egui::Sense {
-                            click: false,
-                            drag: true,
-                            focusable: false,
-                        },
-                    );
-                    ui.painter().galley(
-                        egui::pos2(response.rect.left(), response.rect.top()),
-                        Arc::clone(&galley),
-                        egui::Color32::WHITE,
-                    );
+                    for (galley, start_idx) in galleys {
+                        let response = ui.allocate_response(
+                            galley.rect.size(),
+                            egui::Sense {
+                                click: false,
+                                drag: true,
+                                focusable: false,
+                            },
+                        );
+                        ui.painter().galley(
+                            egui::pos2(response.rect.left(), response.rect.top()),
+                            Arc::clone(&galley),
+                            egui::Color32::WHITE,
+                        );
 
-                    if self.seek_state.should_toggle_pause(&response, &state) {
-                        self.action_tx.send(gui_actions::toggle_pause()).unwrap();
-                    }
-
-                    if response.dragged_by(egui::PointerButton::Primary) {
-                        let mut pixel_pos = response.interact_pointer_pos().unwrap();
-                        pixel_pos.y -= response.rect.top();
-                        pixel_pos.x -= response.rect.left();
-                        let mut row = 0;
-                        let mut col = 0;
-                        let mut char_pos = 0;
-
-                        while row < galley.rows.len()
-                            && galley.rows[row].rect.bottom() < pixel_pos.y
-                        {
-                            char_pos += galley.rows[row].glyphs.len();
-                            row += 1;
-                        }
-                        // I want B to be no larger then A
-                        // The maximum value of B is A
-                        // max(a, b)
-                        row = row.min(galley.rows.len() - 1);
-
-                        let glyphs = &galley.rows[row].glyphs;
-                        while col < glyphs.len()
-                            && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
-                        {
-                            char_pos += 1;
-                            col += 1;
+                        if self.seek_state.should_toggle_pause(&response, &state) {
+                            self.action_tx.send(gui_actions::toggle_pause()).unwrap();
                         }
 
-                        let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
-                        self.action_tx.send(gui_actions::seek(pts)).unwrap();
+                        if response.dragged_by(egui::PointerButton::Primary) {
+                            let mut pixel_pos = response.interact_pointer_pos().unwrap();
+                            pixel_pos.y -= response.rect.top();
+                            pixel_pos.x -= response.rect.left();
+                            let mut row = 0;
+                            let mut col = 0;
+                            let mut char_pos = 0;
+
+                            while row < galley.rows.len()
+                                && galley.rows[row].rect.bottom() < pixel_pos.y
+                            {
+                                char_pos += galley.rows[row].glyphs.len();
+                                row += 1;
+                            }
+                            // I want B to be no larger then A
+                            // The maximum value of B is A
+                            // max(a, b)
+                            row = row.min(galley.rows.len() - 1);
+
+                            let glyphs = &galley.rows[row].glyphs;
+                            while col < glyphs.len()
+                                && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
+                            {
+                                char_pos += 1;
+                                col += 1;
+                            }
+
+                            char_pos += start_idx;
+
+                            let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
+                            println!("Pts: {}", pts);
+                            self.action_tx.send(gui_actions::seek(pts)).unwrap();
+                        }
+                        ui.allocate_space(egui::vec2(0.0, 10.0));
                     }
                 });
         });

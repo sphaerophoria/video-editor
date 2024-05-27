@@ -22,14 +22,16 @@ const Shared = struct {
     mutex: Mutex,
     segments: std.ArrayList(SegmentBounds),
     text: std.ArrayList(u8),
+    split_threshold_s: f32 = 1.0,
+    split_indices: std.ArrayList(u64),
     num_samples_processed: usize,
-
     // No mutex lock necessary
     shutdown: std.atomic.Value(bool),
 
     fn deinit(self: *Shared) void {
         self.segments.deinit();
         self.text.deinit();
+        self.split_indices.deinit();
     }
 };
 
@@ -203,6 +205,47 @@ const WhisperRunner = struct {
     }
 };
 
+fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared) !void {
+    shared.mutex.lock();
+    defer shared.mutex.unlock();
+
+    if (shared.segments.items.len == 0) {
+        const whisper_segment = segment_it.next() orelse {
+            return;
+        };
+        const segment = SegmentBounds{
+            .start = whisper_segment.start_s,
+            .end = whisper_segment.end_s,
+            .char_start = shared.text.items.len,
+            .char_end = shared.text.items.len + whisper_segment.text.len,
+        };
+
+        try shared.segments.append(segment);
+        try shared.segments.append(segment);
+        try shared.text.appendSlice(whisper_segment.text);
+    }
+
+    var last_segment = shared.segments.items[shared.segments.items.len - 1];
+
+    while (segment_it.next()) |whisper_segment| {
+        const segment = SegmentBounds{
+            .start = whisper_segment.start_s,
+            .end = whisper_segment.end_s,
+            .char_start = shared.text.items.len,
+            .char_end = shared.text.items.len + whisper_segment.text.len,
+        };
+
+        try shared.segments.append(segment);
+        try shared.text.appendSlice(whisper_segment.text);
+
+        if (last_segment.end + shared.split_threshold_s <= segment.start) {
+            try shared.split_indices.append(segment.char_start);
+        }
+
+        last_segment = segment;
+    }
+}
+
 fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
     var dec = try decoder.VideoDecoder.init(alloc, path);
     defer dec.deinit();
@@ -235,49 +278,21 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
         buf_pos += data.len;
 
         if (buf_pos == audio_buf.len) {
-            var samples = whisper.next(audio_buf) catch |e| {
+            var segment_it = whisper.next(audio_buf) catch |e| {
                 if (shared.shutdown.load(std.builtin.AtomicOrder.unordered)) {
                     return;
                 }
                 return e;
             };
 
-            shared.mutex.lock();
-            defer shared.mutex.unlock();
-
-            while (samples.next()) |sample| {
-                const segment = SegmentBounds{
-                    .start = sample.start_s,
-                    .end = sample.end_s,
-                    .char_start = shared.text.items.len,
-                    .char_end = shared.text.items.len + sample.text.len,
-                };
-
-                try shared.segments.append(segment);
-                try shared.text.appendSlice(sample.text);
-            }
-
+            try pushWhisperSegments(&segment_it, shared);
             shared.num_samples_processed += buf_size_s * whisper_sample_rate;
             buf_pos = 0;
         }
     }
 
-    var samples = try whisper.next(audio_buf[0..buf_pos]);
-
-    shared.mutex.lock();
-    defer shared.mutex.unlock();
-
-    while (samples.next()) |sample| {
-        const segment = SegmentBounds{
-            .start = sample.start_s,
-            .end = sample.end_s,
-            .char_start = shared.text.items.len,
-            .char_end = shared.text.items.len + sample.text.len,
-        };
-
-        try shared.segments.append(segment);
-        try shared.text.appendSlice(sample.text);
-    }
+    var segment_it = try whisper.next(audio_buf[0..buf_pos]);
+    try pushWhisperSegments(&segment_it, shared);
 }
 
 pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field) !Whisper {
@@ -293,11 +308,18 @@ pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field) !
 
     const init_thread = try Thread.spawn(.{}, initThread, .{ alloc, path, shared });
 
-    return .{
+    var ret = Whisper{
         .alloc = alloc,
         .init_thread = init_thread,
         .shared = shared,
     };
+
+    shared.mutex.lock();
+    const split_threshold = shared.split_threshold_s;
+    shared.mutex.unlock();
+
+    try ret.setSplitThreshold(split_threshold);
+    return ret;
 }
 
 pub fn deinit(self: *Whisper) void {
@@ -310,6 +332,7 @@ pub fn deinit(self: *Whisper) void {
 pub const SaveData = struct {
     text: []const u8,
     segment_timestamps: []const SegmentBounds,
+    split_threshold_s: f32,
     num_samples_processed: usize,
 };
 
@@ -320,9 +343,45 @@ pub fn serialize(self: *Whisper, writer: save.Writer.FieldWriter) !void {
     const data = SaveData{
         .text = self.shared.text.items,
         .segment_timestamps = self.shared.segments.items,
+        .split_threshold_s = self.shared.split_threshold_s,
         .num_samples_processed = self.shared.num_samples_processed,
     };
     try writer.write(data);
+}
+
+// How much time passes between words before we newline
+pub fn setSplitThreshold(self: *Whisper, threshold_s: f32) !void {
+    self.shared.mutex.lock();
+    defer self.shared.mutex.unlock();
+
+    var split_indices = std.ArrayList(u64).init(self.alloc);
+    errdefer split_indices.deinit();
+
+    const segments = self.shared.segments.items;
+    for (0..segments.len -| 1) |i| {
+        const a = &segments[i];
+        const b = &segments[i + 1];
+
+        if (a.end + threshold_s <= b.start) {
+            try split_indices.append(b.char_start);
+        }
+    }
+
+    self.shared.split_indices.deinit();
+    self.shared.split_indices = split_indices;
+
+    for (self.shared.segments.items) |segment| {
+        std.debug.print("[{d}-->{d}] {s}\n", .{ segment.start, segment.end, self.shared.text.items[segment.char_start..segment.char_end] });
+    }
+
+    var last_split_idx: usize = 0;
+    for (self.shared.split_indices.items) |split_idx| {
+        std.debug.print("{s}\n", .{self.shared.text.items[last_split_idx..split_idx]});
+        last_split_idx = split_idx;
+    }
+
+    std.debug.print("split indices: {any}\n", .{split_indices});
+    self.shared.split_threshold_s = threshold_s;
 }
 
 fn sharedFromInitData(alloc: Allocator, init_data: ?save.Data.Field) !Shared {
@@ -332,12 +391,16 @@ fn sharedFromInitData(alloc: Allocator, init_data: ?save.Data.Field) !Shared {
     var text = std.ArrayList(u8).init(alloc);
     errdefer text.deinit();
 
+    var split_indices = std.ArrayList(u64).init(alloc);
+    errdefer split_indices.deinit();
+
     if (init_data == null) {
         return Shared{
             .mutex = .{},
             .segments = segments,
             .text = text,
             .shutdown = std.atomic.Value(bool).init(false),
+            .split_indices = split_indices,
             .num_samples_processed = 0,
         };
     }
@@ -353,7 +416,9 @@ fn sharedFromInitData(alloc: Allocator, init_data: ?save.Data.Field) !Shared {
         .segments = segments,
         .text = text,
         .shutdown = std.atomic.Value(bool).init(false),
+        .split_indices = split_indices,
         .num_samples_processed = parsed.value.num_samples_processed,
+        .split_threshold_s = parsed.value.split_threshold_s,
     };
 }
 
