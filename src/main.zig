@@ -18,12 +18,14 @@ const Args = struct {
     it: std.process.ArgIterator,
     input: [:0]const u8,
     output: [:0]const u8,
+    debug_output: ?[:0]const u8,
     generate_subtitles: bool,
 
     const Switch = enum {
         @"--input",
         @"--output",
         @"--skip-subtitles",
+        @"--debug-output",
         @"--help",
 
         fn parse(s: []const u8) ?Switch {
@@ -47,6 +49,7 @@ const Args = struct {
         var input: ?[:0]const u8 = null;
         var output: ?[:0]const u8 = null;
         var generate_subtitles: bool = true;
+        var debug_output: ?[:0]const u8 = null;
         const process_name = args.next() orelse "video-editor";
         while (args.next()) |arg| {
             const s = Switch.parse(arg) orelse {
@@ -70,6 +73,9 @@ const Args = struct {
                 .@"--skip-subtitles" => {
                     generate_subtitles = false;
                 },
+                .@"--debug-output" => {
+                    debug_output = args.next();
+                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -86,6 +92,7 @@ const Args = struct {
                 print("output not provided\n", .{});
                 help(process_name);
             },
+            .debug_output = debug_output,
             .generate_subtitles = generate_subtitles,
         };
     }
@@ -96,6 +103,7 @@ const Args = struct {
         inline for (std.meta.fields(Switch)) |s| {
             print("{s}: ", .{s.name});
             const value: Switch = @enumFromInt(s.value);
+
             switch (value) {
                 .@"--input" => {
                     print("File to work with", .{});
@@ -105,6 +113,9 @@ const Args = struct {
                 },
                 .@"--skip-subtitles" => {
                     print("Skip subtitle generation", .{});
+                },
+                .@"--debug-output" => {
+                    print("Optional location to put extra debugging files", .{});
                 },
                 .@"--help" => {
                     print("Show this help", .{});
@@ -191,7 +202,7 @@ pub fn main() !void {
 
     var wtm: ?WordTimestampGenerator = null;
     if (args.generate_subtitles) {
-        wtm = try WordTimestampGenerator.init(alloc, args.input, save_data.wordTimestampMap());
+        wtm = try WordTimestampGenerator.init(alloc, args.input, save_data.wordTimestampMap(), args.debug_output);
     }
     defer if (wtm) |*w| w.deinit();
 

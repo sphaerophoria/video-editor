@@ -3,6 +3,7 @@ const decoder = @import("decoder.zig");
 const std = @import("std");
 const audio = @import("audio.zig");
 const save = @import("save.zig");
+const WavWriter = @import("WavWriter.zig");
 const Allocator = std.mem.Allocator;
 const Thread = std.Thread;
 const Mutex = Thread.Mutex;
@@ -246,7 +247,52 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared) !v
     }
 }
 
-fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
+// ffmpeg -> []const u8, format tag
+
+const DebugOutput = struct {
+    folder: ?[]const u8,
+
+    fn init(debug_output_path: ?[]const u8) !DebugOutput {
+        if (debug_output_path) |p| {
+            try std.fs.cwd().makePath(p);
+        }
+        return .{
+            .folder = debug_output_path,
+        };
+    }
+
+    fn generateFileName(self: *DebugOutput, alloc: Allocator, start_sample: usize, end_sample: usize, ext: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(alloc, "{s}/{d}_{d}.{s}", .{self.folder.?, start_sample, end_sample, ext});
+    }
+
+    fn writeWhisperIo(self: *DebugOutput, alloc: Allocator, audio_buf: []const u8, text: []const u8, start_sample: usize, end_sample: usize) !void {
+        if (self.folder == null) {
+            return;
+        }
+
+        const audio_file_name = try self.generateFileName(alloc, start_sample, end_sample, "wav");
+        defer alloc.free(audio_file_name);
+
+        const text_file_name = try self.generateFileName(alloc, start_sample, end_sample, "txt");
+        defer alloc.free(text_file_name);
+
+        var wav_writer = try WavWriter.init(alloc, whisper_sample_rate, 1, audio.Format.f32, audio_file_name);
+        defer wav_writer.deinit();
+
+        try wav_writer.writeAudio(audio_buf);
+
+        var text_output = try std.fs.cwd().createFile(text_file_name, .{
+            .truncate = true,
+        });
+        defer text_output.close();
+
+        try text_output.writeAll(text);
+    }
+};
+
+fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_output_path: ?[]const u8) !void {
+    var debug_output = try DebugOutput.init(debug_output_path);
+
     var dec = try decoder.VideoDecoder.init(alloc, path);
     defer dec.deinit();
 
@@ -285,8 +331,20 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
                 return e;
             };
 
+            shared.mutex.lock();
+            const text_start = shared.text.items.len;
+            shared.mutex.unlock();
+
             try pushWhisperSegments(&segment_it, shared);
             shared.num_samples_processed += buf_size_s * whisper_sample_rate;
+
+            const end_sample = sampler.output_samples;
+            const start_sample = end_sample - whisper_sample_rate * buf_size_s;
+
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+            try debug_output.writeWhisperIo(alloc, audio_buf, shared.text.items[text_start..shared.text.items.len], start_sample, end_sample);
+
             buf_pos = 0;
         }
     }
@@ -295,7 +353,7 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
     try pushWhisperSegments(&segment_it, shared);
 }
 
-pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field) !Whisper {
+pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field, debug_output: ?[]const u8) !Whisper {
     var segments = std.ArrayList(SegmentBounds).init(alloc);
     errdefer segments.deinit();
 
@@ -306,7 +364,7 @@ pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field) !
     errdefer alloc.destroy(shared);
     shared.* = try sharedFromInitData(alloc, init_data);
 
-    const init_thread = try Thread.spawn(.{}, initThread, .{ alloc, path, shared });
+    const init_thread = try Thread.spawn(.{}, initThread, .{ alloc, path, shared, debug_output });
 
     var ret = Whisper{
         .alloc = alloc,
