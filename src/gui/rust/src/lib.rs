@@ -682,7 +682,7 @@ impl eframe::App for EframeImpl {
                         char_pos += galley.rows[row].glyphs.len();
                         row += 1;
                     }
-                    row = row.max(galley.rows.len() - 1);
+                    row = row.min(galley.rows.len() - 1);
 
                     let glyphs = &galley.rows[row].glyphs;
                     while col < glyphs.len() && glyphs[col].pos.x + glyphs[col].size.x < pixel_pos.x
