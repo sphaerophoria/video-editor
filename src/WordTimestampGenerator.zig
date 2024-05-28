@@ -3,6 +3,8 @@ const decoder = @import("decoder.zig");
 const std = @import("std");
 const audio = @import("audio.zig");
 const Allocator = std.mem.Allocator;
+const Thread = std.Thread;
+const Mutex = Thread.Mutex;
 
 const SegmentBounds = struct {
     char_start: usize,
@@ -12,8 +14,22 @@ const SegmentBounds = struct {
 };
 
 alloc: Allocator,
-segments: std.ArrayList(SegmentBounds),
-text: []const u8,
+init_thread: Thread,
+shared: *Shared,
+
+const Shared = struct {
+    mutex: Mutex,
+    segments: std.ArrayList(SegmentBounds),
+    text: std.ArrayList(u8),
+
+    // No mutex lock necessary
+    shutdown: std.atomic.Value(bool),
+
+    fn deinit(self: *Shared) void {
+        self.segments.deinit();
+        self.text.deinit();
+    }
+};
 
 const Whisper = @This();
 
@@ -140,7 +156,12 @@ const WhisperRunner = struct {
         }
     };
 
-    fn init() !WhisperRunner {
+    fn abortCallback(userdata: ?*anyopaque) callconv(.C) bool {
+        const val: *std.atomic.Value(bool) = @ptrCast(@alignCast(userdata));
+        return val.load(std.builtin.AtomicOrder.unordered);
+    }
+
+    fn init(shutdown: *std.atomic.Value(bool)) !WhisperRunner {
         c.whisper_log_set(logCallback, null);
 
         const cparams = c.whisper_context_default_params();
@@ -153,6 +174,8 @@ const WhisperRunner = struct {
         var params = c.whisper_full_default_params(c.WHISPER_SAMPLING_BEAM_SEARCH);
         params.max_len = 1;
         params.token_timestamps = true;
+        params.abort_callback = abortCallback;
+        params.abort_callback_user_data = shutdown;
 
         return .{
             .start_time_ms = 0,
@@ -182,7 +205,7 @@ const WhisperRunner = struct {
     }
 };
 
-pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
+fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared) !void {
     var dec = try decoder.VideoDecoder.init(alloc, path);
     defer dec.deinit();
 
@@ -198,16 +221,10 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
 
     var buf_pos: usize = 0;
 
-    var segments = std.ArrayList(SegmentBounds).init(alloc);
-    errdefer segments.deinit();
-
-    var text = std.ArrayList(u8).init(alloc);
-    errdefer text.deinit();
-
-    var whisper = try WhisperRunner.init();
+    var whisper = try WhisperRunner.init(&shared.shutdown);
     defer whisper.deinit();
 
-    while (true) {
+    while (!shared.shutdown.load(std.builtin.AtomicOrder.unordered)) {
         const data = try sampler.next() orelse {
             break;
         };
@@ -215,17 +232,26 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
         buf_pos += data.len;
 
         if (buf_pos == audio_buf.len) {
-            var samples = try whisper.next(audio_buf);
+            var samples = whisper.next(audio_buf) catch |e| {
+                if (shared.shutdown.load(std.builtin.AtomicOrder.unordered)) {
+                    return;
+                }
+                return e;
+            };
+
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+
             while (samples.next()) |sample| {
                 const segment = SegmentBounds{
                     .start = sample.start_s,
                     .end = sample.end_s,
-                    .char_start = text.items.len,
-                    .char_end = text.items.len + sample.text.len,
+                    .char_start = shared.text.items.len,
+                    .char_end = shared.text.items.len + sample.text.len,
                 };
 
-                try segments.append(segment);
-                try text.appendSlice(sample.text);
+                try shared.segments.append(segment);
+                try shared.text.appendSlice(sample.text);
             }
 
             buf_pos = 0;
@@ -233,28 +259,54 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
     }
 
     var samples = try whisper.next(audio_buf[0..buf_pos]);
+
+    shared.mutex.lock();
+    defer shared.mutex.unlock();
+
     while (samples.next()) |sample| {
         const segment = SegmentBounds{
             .start = sample.start_s,
             .end = sample.end_s,
-            .char_start = text.items.len,
-            .char_end = text.items.len + sample.text.len,
+            .char_start = shared.text.items.len,
+            .char_end = shared.text.items.len + sample.text.len,
         };
 
-        try segments.append(segment);
-        try text.appendSlice(sample.text);
+        try shared.segments.append(segment);
+        try shared.text.appendSlice(sample.text);
     }
+}
+
+pub fn init(alloc: Allocator, path: [:0]const u8) !Whisper {
+    var segments = std.ArrayList(SegmentBounds).init(alloc);
+    errdefer segments.deinit();
+
+    var text = std.ArrayList(u8).init(alloc);
+    errdefer text.deinit();
+
+    const shared = try alloc.create(Shared);
+    errdefer alloc.destroy(shared);
+
+    shared.* = .{
+        .mutex = .{},
+        .segments = segments,
+        .text = text,
+        .shutdown = std.atomic.Value(bool).init(false),
+    };
+
+    const init_thread = try Thread.spawn(.{}, initThread, .{ alloc, path, shared });
 
     return .{
         .alloc = alloc,
-        .segments = segments,
-        .text = try text.toOwnedSlice(),
+        .init_thread = init_thread,
+        .shared = shared,
     };
 }
 
 pub fn deinit(self: *Whisper) void {
-    self.segments.deinit();
-    self.alloc.free(self.text);
+    self.shared.shutdown.store(true, std.builtin.AtomicOrder.unordered);
+    self.init_thread.join();
+    self.shared.deinit();
+    self.alloc.destroy(self.shared);
 }
 
 pub export fn wtm_get_time(m: *Whisper, char_pos: u64) f32 {
@@ -263,6 +315,10 @@ pub export fn wtm_get_time(m: *Whisper, char_pos: u64) f32 {
             return lhs < rhs.char_start;
         }
     }.f;
-    const elem = std.sort.upperBound(SegmentBounds, char_pos, m.segments.items, {}, lessThan);
-    return m.segments.items[elem -| 1].start;
+
+    m.shared.mutex.lock();
+    defer m.shared.mutex.unlock();
+
+    const elem = std.sort.upperBound(SegmentBounds, char_pos, m.shared.segments.items, {}, lessThan);
+    return m.shared.segments.items[elem -| 1].start;
 }

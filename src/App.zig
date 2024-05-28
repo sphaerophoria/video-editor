@@ -174,8 +174,13 @@ fn updateVideoFrame(self: *App, now: *std.time.Instant) !void {
 }
 
 fn updateAppState(self: *App) !void {
+    if (self.refs.wtm) |wtm| wtm.shared.mutex.lock();
+    defer {
+        if (self.refs.wtm) |wtm| wtm.shared.mutex.unlock();
+    }
+
     var text: []const u8 = &.{};
-    if (self.refs.wtm) |wtm| text = wtm.text;
+    if (self.refs.wtm) |wtm| text = wtm.shared.text.items;
 
     try self.refs.app_state.setSnapshot(.{
         .paused = self.player_state.isPaused(),
