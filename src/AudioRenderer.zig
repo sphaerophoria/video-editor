@@ -87,7 +87,7 @@ const InitThread = struct {
 
         var num_samples_collected: usize = 0;
 
-        while (true) {
+        while (!self.shared.shutdown.load(std.builtin.AtomicOrder.unordered)) {
             var frame = try dec.next(stream_info.stream_id) orelse {
                 break;
             };
@@ -165,6 +165,8 @@ const InitData = struct {
     mutex: std.Thread.Mutex,
     samples: std.ArrayList(Sample),
     num_samples: usize,
+    // No mutex lock necessary
+    shutdown: std.atomic.Value(bool),
 
     fn deinit(self: *InitData) void {
         self.samples.deinit();
@@ -254,6 +256,7 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !AudioRenderer {
         .mutex = .{},
         .samples = std.ArrayList(Sample).init(alloc),
         .num_samples = 1,
+        .shutdown = std.atomic.Value(bool).init(false),
     };
 
     const init_thread = try InitThread.init(alloc, path, shared);
@@ -273,6 +276,7 @@ pub fn init(alloc: Allocator, path: [:0]const u8) !AudioRenderer {
 }
 
 pub fn deinit(self: *AudioRenderer) void {
+    self.shared.shutdown.store(true, std.builtin.AtomicOrder.unordered);
     self.init_thread_handle.join();
     self.shared.deinit();
     self.alloc.destroy(self.shared);
