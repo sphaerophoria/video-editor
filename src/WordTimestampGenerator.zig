@@ -23,7 +23,7 @@ const Shared = struct {
     mutex: Mutex,
     segments: std.ArrayList(SegmentBounds),
     text: std.ArrayList(u8),
-    split_threshold_s: f32 = 1.0,
+    split_threshold_s: f32 = 0.8,
     split_indices: std.ArrayList(u64),
     num_samples_processed: usize,
     // No mutex lock necessary
