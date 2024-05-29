@@ -105,6 +105,7 @@ void audiorenderer_render(AudioRenderer* renderer, GuiGl* guigl, float zoom, flo
 void audiorenderer_deinit_gl(AudioRenderer* renderer, GuiGl* guigl);
 
 float wtm_get_time(WordTimestampMap* m, uint64_t char_pos);
+uint64_t wtm_get_char_pos(WordTimestampMap* m, float pts);
 
 struct AppStateSnapshot appstate_snapshot(AppState* app);
 void appstate_deinit(AppState* app, const struct AppStateSnapshot* snapshot);

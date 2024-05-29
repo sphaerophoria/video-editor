@@ -221,7 +221,7 @@ struct ClipTimelineRenderer<'a> {
     ui: &'a mut egui::Ui,
     progress_bar: &'a mut ProgressBar,
     state: &'a c_bindings::AppStateSnapshot,
-    action_tx: &'a Sender<c_bindings::GuiAction>,
+    action_tx: &'a mut ActionRequestor,
 }
 
 impl ClipTimelineRenderer<'_> {
@@ -259,6 +259,7 @@ impl ClipTimelineRenderer<'_> {
             seek_state,
         ) {
             changed = true;
+            println!("end pos: {pos}");
             edited_clip.end = pos;
         }
 
@@ -277,8 +278,7 @@ impl ClipTimelineRenderer<'_> {
 
         if changed {
             self.action_tx
-                .send(gui_actions::clip_edit(&edited_clip))
-                .unwrap();
+                .send(gui_actions::clip_edit(&edited_clip));
         }
     }
 }
@@ -331,14 +331,14 @@ impl ProgressBar {
         converter: &ProgressPosConverter,
         ui: &egui::Ui,
         response: &egui::Response,
-        action_tx: &Sender<c_bindings::GuiAction>,
+        action_tx: &mut ActionRequestor,
     ) {
         let primary_down = response.dragged_by(egui::PointerButton::Primary);
         let ctrl_down = ui.input(|i| i.modifiers.ctrl);
 
         if let Some(pending_clip) = &mut self.pending_clip {
             if response.drag_stopped_by(egui::PointerButton::Primary) {
-                action_tx.send(gui_actions::clip_add(pending_clip)).unwrap();
+                action_tx.send(gui_actions::clip_add(pending_clip));
                 self.pending_clip = None;
             } else {
                 let pos = response
@@ -365,7 +365,7 @@ impl ProgressBar {
         converter: &ProgressPosConverter,
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
-        action_tx: &Sender<c_bindings::GuiAction>,
+        action_tx: &mut ActionRequestor,
         seek_state: &mut SeekState,
     ) -> Option<f32> {
         let mut ret = None;
@@ -374,13 +374,14 @@ impl ProgressBar {
             let pos = response
                 .interact_pointer_pos()
                 .expect("Pointer should interact if dragging");
-            let duration_pos = converter.rect_to_duration(pos.x);
-            action_tx.send(gui_actions::seek(duration_pos)).unwrap();
+            let duration_pos = converter.rect_to_duration(pos.x.clamp(converter.rect.left(), converter.rect.right()));
+            println!("duration pos {duration_pos}");
+            action_tx.send(gui_actions::seek(duration_pos));
             ret = Some(duration_pos);
         }
 
         if seek_state.should_toggle_pause(response, state) {
-            action_tx.send(gui_actions::toggle_pause()).unwrap();
+            action_tx.send(gui_actions::toggle_pause());
         }
 
         ret
@@ -440,7 +441,7 @@ impl ProgressBar {
         ui: &egui::Ui,
         response: &egui::Response,
         state: &c_bindings::AppStateSnapshot,
-        action_tx: &Sender<c_bindings::GuiAction>,
+        action_tx: &mut ActionRequestor,
         seek_state: &mut SeekState,
     ) {
         self.handle_clip_creation(converter, ui, response, action_tx);
@@ -454,9 +455,10 @@ impl ProgressBar {
         &mut self,
         ui: &mut egui::Ui,
         state: &SnapshotHolder,
-        action_tx: &Sender<c_bindings::GuiAction>,
+        action_tx: &mut ActionRequestor,
         audio_renderer: RendererPtr,
         seek_state: &mut SeekState,
+        scroll_to_pos: Option<f32>,
     ) {
         ui.with_layout(egui::Layout::right_to_left(Default::default()), |ui| {
             let response = ui.allocate_response(
@@ -518,6 +520,17 @@ impl ProgressBar {
                 .rect_filled(progress_rect, 0.0, egui::Color32::YELLOW);
 
             self.handle_response(&converter, ui, &response, state, action_tx, seek_state);
+
+            if let Some(scroll_to_pos) = scroll_to_pos {
+                let half_visible = 0.5 / self.zoom;
+                let min_visible = self.widget_center_norm - half_visible;
+                let max_visible = self.widget_center_norm + half_visible;
+
+                let scroll_pos_norm = scroll_to_pos / state.total_runtime;
+                if scroll_pos_norm < min_visible || scroll_pos_norm > max_visible {
+                    self.widget_center_norm = scroll_pos_norm;
+                }
+            }
         });
     }
 }
@@ -550,11 +563,33 @@ impl Drop for SnapshotHolder {
     }
 }
 
+
+struct ActionRequestor {
+    action_tx: Sender<c_bindings::GuiAction>,
+    scroll_to_pts: Option<f32>,
+}
+
+impl ActionRequestor {
+    fn reset_state(&mut self) {
+        self.scroll_to_pts = None;
+    }
+
+    fn send(&mut self, action: c_bindings::GuiAction) {
+        match action.tag {
+            c_bindings::GuiActionTag_gui_action_seek => unsafe {
+                self.scroll_to_pts = Some(action.data.seek_position);
+            }
+            _ => (),
+        }
+        self.action_tx.send(action).unwrap();
+    }
+}
+
 struct EframeImpl {
     frame_renderer: RendererPtr,
     audio_renderer: RendererPtr,
     wtm: RendererPtr,
-    action_tx: Sender<c_bindings::GuiAction>,
+    action_tx: ActionRequestor,
     gui: *mut Gui,
     progress_bar: ProgressBar,
     seek_state: SeekState,
@@ -583,7 +618,10 @@ impl EframeImpl {
             frame_renderer,
             audio_renderer,
             wtm,
-            action_tx,
+            action_tx: ActionRequestor {
+                action_tx,
+                scroll_to_pts: None,
+            },
             gui,
             progress_bar: ProgressBar {
                 zoom: 1.0,
@@ -599,6 +637,9 @@ impl EframeImpl {
 
 impl eframe::App for EframeImpl {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let scroll_to_pts = self.action_tx.scroll_to_pts;
+        self.action_tx.reset_state();
+
         let mut frame = egui::Frame::central_panel(&ctx.style());
         frame.inner_margin = egui::Margin::same(0.0);
 
@@ -610,29 +651,29 @@ impl eframe::App for EframeImpl {
             ui.horizontal(|ui| {
                 if ui.button(button_text).clicked() {
                     self.action_tx
-                        .send(gui_actions::toggle_pause())
-                        .expect("failed to send action from gui");
+                        .send(gui_actions::toggle_pause());
                 };
 
                 ui.label(format!(
                     "{:.02}/{:.02}",
                     state.current_position, state.total_runtime
                 ));
+
                 ui.spacing_mut().slider_width = ui.available_width();
 
                 if ui.button("Delete clip").clicked() {
                     self.action_tx
-                        .send(gui_actions::clip_remove(state.current_position))
-                        .unwrap();
+                        .send(gui_actions::clip_remove(state.current_position));
                 }
             });
 
             self.progress_bar.show(
                 ui,
                 &state,
-                &self.action_tx,
+                &mut self.action_tx,
                 self.audio_renderer.clone(),
                 &mut self.seek_state,
+                scroll_to_pts,
             );
         });
 
@@ -651,15 +692,16 @@ impl eframe::App for EframeImpl {
                 let i: usize = i.try_into().unwrap();
                 let text_idx: usize = (*state.text_split_indices.add(i)).try_into().unwrap();
 
+                let end_idx = text_idx.min(s.len());
                 let layout = egui::text::LayoutJob::simple(
-                    s[last_idx..text_idx.min(s.len())].to_string(),
+                    s[last_idx..end_idx].to_string(),
                     font_id.clone(),
                     ui.visuals().text_color(),
                     wrap_width,
                 );
 
-                galleys.push((ui.painter().layout_job(layout), last_idx));
-                last_idx = text_idx;
+                galleys.push((ui.painter().layout_job(layout), last_idx, end_idx));
+                last_idx = end_idx;
             }
 
             let layout = egui::text::LayoutJob::simple(
@@ -669,12 +711,28 @@ impl eframe::App for EframeImpl {
                 wrap_width,
             );
 
-            galleys.push((ui.painter().layout_job(layout), last_idx));
+            galleys.push((ui.painter().layout_job(layout), last_idx, s.len()));
 
             egui::ScrollArea::vertical()
                 .drag_to_scroll(false)
                 .show(ui, |ui| {
-                    for (galley, start_idx) in galleys {
+
+                    let current_char_pos: Option<usize> = if self.wtm.0.is_null() {
+                        None
+                    } else {
+                        Some(c_bindings::wtm_get_char_pos(self.wtm.0, state.current_position).try_into().unwrap())
+                    };
+
+                    let scroll_char_pos: Option<usize> = if self.wtm.0.is_null() {
+                        None
+                    } else {
+                        scroll_to_pts.as_ref().map(|pts| {
+                            c_bindings::wtm_get_char_pos(self.wtm.0, *pts).try_into().unwrap()
+                        })
+                    };
+
+
+                    for (galley, start_idx, end_idx) in galleys {
                         let response = ui.allocate_response(
                             galley.rect.size(),
                             egui::Sense {
@@ -683,6 +741,19 @@ impl eframe::App for EframeImpl {
                                 focusable: false,
                             },
                         );
+
+                        if let Some(scroll_char_pos) = scroll_char_pos.as_ref() {
+                            if let Some(rect) = char_pos_to_text_pos(*scroll_char_pos, start_idx, end_idx, &galley, response.rect.left_top()) {
+                                ui.scroll_to_rect(rect, None);
+                            }
+                        }
+
+                        if let Some(current_char_pos) = current_char_pos {
+                            if let Some(rect) = char_pos_to_text_pos(current_char_pos, start_idx, end_idx, &galley, response.rect.left_top()) {
+                                ui.painter().rect_filled(rect, 0.0, egui::Color32::YELLOW);
+                            }
+                        }
+
                         ui.painter().galley(
                             egui::pos2(response.rect.left(), response.rect.top()),
                             Arc::clone(&galley),
@@ -690,7 +761,7 @@ impl eframe::App for EframeImpl {
                         );
 
                         if self.seek_state.should_toggle_pause(&response, &state) {
-                            self.action_tx.send(gui_actions::toggle_pause()).unwrap();
+                            self.action_tx.send(gui_actions::toggle_pause());
                         }
 
                         if response.dragged_by(egui::PointerButton::Primary) {
@@ -723,8 +794,7 @@ impl eframe::App for EframeImpl {
                             char_pos += start_idx;
 
                             let pts = c_bindings::wtm_get_time(self.wtm.0, char_pos as u64);
-                            println!("Pts: {}", pts);
-                            self.action_tx.send(gui_actions::seek(pts)).unwrap();
+                            self.action_tx.send(gui_actions::seek(pts));
                         }
                         ui.allocate_space(egui::vec2(0.0, 10.0));
                     }
@@ -741,8 +811,7 @@ impl eframe::App for EframeImpl {
                             ..
                         } => {
                             self.action_tx
-                                .send(gui_actions::toggle_pause())
-                                .expect("failed to send action from gui");
+                                .send(gui_actions::toggle_pause());
                         }
                         egui::Event::Key {
                             key: egui::Key::S,
@@ -751,8 +820,7 @@ impl eframe::App for EframeImpl {
                             ..
                         } => {
                             self.action_tx
-                                .send(gui_actions::save())
-                                .expect("failed to send save action from gui");
+                                .send(gui_actions::save());
                         }
                         _ => (),
                     }
@@ -790,4 +858,41 @@ impl eframe::App for EframeImpl {
             (*self.gui).inner.lock().unwrap().ctx = None;
         }
     }
+}
+
+
+fn char_pos_to_text_pos(pos: usize, galley_start_char: usize, galley_end_char: usize, galley: &egui::Galley, galley_tl: egui::Pos2) -> Option<egui::Rect> {
+    if pos >= galley_start_char && pos < galley_end_char {
+        let galley_char_pos = pos - galley_start_char;
+
+        let mut acc: usize = 0;
+        let mut row = 0;
+
+        loop {
+            if row >= galley.rows.len() {
+                panic!("Row index out of bounds, this should never happen");
+            }
+            let row_len = galley.rows[row].glyphs.len();
+
+            if acc + row_len >= galley_char_pos {
+                break;
+            }
+
+            acc += row_len;
+            row += 1;
+        }
+
+        let col = (galley_char_pos - acc).min(galley.rows[row].glyphs.len() - 1);
+        let glyph = galley.rows[row].glyphs[col];
+
+        let left = glyph.pos.x + galley_tl.x;
+        let bottom = glyph.pos.y + galley_tl.y + 5.0;
+        let top = bottom - 20.0;
+        let right = left + 3.0;
+
+        let cursor_rect = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
+        return Some(cursor_rect);
+    }
+
+    None
 }

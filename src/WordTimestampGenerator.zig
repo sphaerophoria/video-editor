@@ -277,7 +277,7 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
             const prev_segment = shared.segments.items[shared.segments.items.len - 1];
 
             if (segment.start < prev_segment.start) {
-                std.debug.print("Skipping \"{s}\" at {d} because it is before \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
+                //std.debug.print("Skipping \"{s}\" at {d} because it is before \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
                 continue;
             }
 
@@ -289,7 +289,7 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
             // If the previous text is punctuation, it's duration is short, and
             // so the overlap is guaranteed to be high due to short minimum distnace
             if (!prev_text_is_punctuation and relative_overlap > 0.7) {
-                std.debug.print("Skipping \"{s}\" at {d} because it has high overlap with \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
+                //std.debug.print("Skipping \"{s}\" at {d} because it has high overlap with \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
                 continue;
             }
 
@@ -298,7 +298,7 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
             }
 
             if (!first_word_pushed and wordsAreSame(prev_text, whisper_segment.text)) {
-                std.debug.print("Skipping \"{s}\" at {d} because it is the same as the word before\n", .{whisper_segment.text, whisper_segment.file_start_s});
+                //std.debug.print("Skipping \"{s}\" at {d} because it is the same as the word before\n", .{whisper_segment.text, whisper_segment.file_start_s});
                 continue;
             }
 
@@ -558,4 +558,21 @@ pub export fn wtm_get_time(m: *Whisper, char_pos: u64) f32 {
 
     const elem = std.sort.upperBound(SegmentBounds, char_pos, m.shared.segments.items, {}, lessThan);
     return m.shared.segments.items[elem -| 1].start;
+}
+
+pub export fn wtm_get_char_pos(m: *Whisper, pts: f32) u64 {
+    const lessThan = struct {
+        fn f(_: void, lhs: f32, rhs: SegmentBounds) bool {
+            return lhs < rhs.start;
+        }
+    }.f;
+
+    m.shared.mutex.lock();
+    defer m.shared.mutex.unlock();
+
+    const elem = std.sort.upperBound(SegmentBounds, pts, m.shared.segments.items, {}, lessThan);
+    if (elem >= m.shared.segments.items.len) {
+        return std.math.maxInt(u64);
+    }
+    return @intCast(m.shared.segments.items[elem].char_start);
 }
