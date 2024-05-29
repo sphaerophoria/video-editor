@@ -20,11 +20,7 @@ mod gui_actions {
     use crate::c_bindings::*;
 
     fn make_action(tag: GuiActionTag) -> GuiAction {
-        unsafe {
-            let mut ret = std::mem::MaybeUninit::<GuiAction>::zeroed();
-            (*ret.as_mut_ptr()).tag = tag;
-            ret.assume_init()
-        }
+        GuiAction { tag };
     }
 
     pub fn none() -> GuiAction {
