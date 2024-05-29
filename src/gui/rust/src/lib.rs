@@ -649,10 +649,10 @@ impl eframe::App for EframeImpl {
             let mut last_idx = 0;
             for i in 0..state.text_split_indices_len {
                 let i: usize = i.try_into().unwrap();
-                let text_idx = (*state.text_split_indices.add(i)).try_into().unwrap();
+                let text_idx: usize = (*state.text_split_indices.add(i)).try_into().unwrap();
 
                 let layout = egui::text::LayoutJob::simple(
-                    s[last_idx..text_idx].to_string(),
+                    s[last_idx..text_idx.min(s.len())].to_string(),
                     font_id.clone(),
                     ui.visuals().text_color(),
                     wrap_width,
@@ -663,7 +663,7 @@ impl eframe::App for EframeImpl {
             }
 
             let layout = egui::text::LayoutJob::simple(
-                s[last_idx..s.len()].to_string(),
+                s[last_idx.min(s.len())..s.len()].to_string(),
                 font_id.clone(),
                 ui.visuals().text_color(),
                 wrap_width,

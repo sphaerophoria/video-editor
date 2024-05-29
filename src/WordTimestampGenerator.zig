@@ -214,6 +214,32 @@ const WhisperRunner = struct {
     }
 };
 
+fn isPunctuation(text: []const u8) bool {
+    // English only, but I speak English only.
+    for (text) |v| {
+        if ((v >= 'A' and v <= 'Z') or
+            (v >= 'a' and v <= 'z') or
+            (v >= '1' and v <= '9'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn shouldSplit(text: []const u8) bool {
+    if (text.len == 0) {
+        return false;
+    }
+
+    const last_char = text[text.len - 1];
+    return last_char == '.' or last_char == '?' or last_char == '!';
+}
+
+fn wordsAreSame(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
 fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, buf_size_s: f32, required_context_s: f32) !void {
     shared.mutex.lock();
     defer shared.mutex.unlock();
@@ -236,6 +262,7 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
 
     var last_segment = shared.segments.items[shared.segments.items.len - 1];
 
+    var first_word_pushed = false;
     while (segment_it.next()) |whisper_segment| {
         var segment = SegmentBounds{
             .start = whisper_segment.file_start_s,
@@ -244,18 +271,37 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
             .char_end = shared.text.items.len + whisper_segment.text.len,
         };
 
-        std.debug.print("[{d} -> {d}] {s}\n", .{whisper_segment.file_start_s, whisper_segment.file_end_s, whisper_segment.text});
-
-        // Project starts at 12.02 (1.02)
-        if (shared.segments.items.len > 0) {
+        // Any comparison with the last word should only happen at the
+        // beginning of a buffer, otherwise we trust whisper's output
+        if (!first_word_pushed and shared.segments.items.len > 0) {
             const prev_segment = shared.segments.items[shared.segments.items.len - 1];
-            const overlap_s = prev_segment.end - segment.start;
-            const word_len = @min(prev_segment.end - prev_segment.start, segment.end - segment.start);
-            const relative_overlap = overlap_s / word_len;
-            if (relative_overlap > 0.7) {
+
+            if (segment.start < prev_segment.start) {
+                std.debug.print("Skipping \"{s}\" at {d} because it is before \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
                 continue;
             }
-            segment.start = prev_segment.end;
+
+            const prev_text = shared.text.items[prev_segment.char_start..prev_segment.char_end];
+            const prev_text_is_punctuation = isPunctuation(prev_text);
+            const overlap_s = prev_segment.end - segment.start;
+            const word_len = @max(prev_segment.end - prev_segment.start, segment.end - segment.start);
+            const relative_overlap = overlap_s / word_len;
+            // If the previous text is punctuation, it's duration is short, and
+            // so the overlap is guaranteed to be high due to short minimum distnace
+            if (!prev_text_is_punctuation and relative_overlap > 0.7) {
+                std.debug.print("Skipping \"{s}\" at {d} because it has high overlap with \"{s}\"\n", .{ whisper_segment.text, whisper_segment.file_start_s, shared.text.items[prev_segment.char_start..prev_segment.char_end] });
+                continue;
+            }
+
+            if (overlap_s > 0.0) {
+                segment.start = prev_segment.end;
+            }
+
+            if (!first_word_pushed and wordsAreSame(prev_text, whisper_segment.text)) {
+                std.debug.print("Skipping \"{s}\" at {d} because it is the same as the word before\n", .{whisper_segment.text, whisper_segment.file_start_s});
+                continue;
+            }
+
         }
 
         // Project starts at 12.0 (7.0)
@@ -263,13 +309,23 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, bu
             continue;
         }
 
+        // Punctuation can take up large chunks of time. If this happens on
+        // the boarder of a segment, the next segment can find words that
+        // were previous attributed to being part of the silence at the end
+        // of a sentence. Keep punctuation short so that words do not end
+        // up overlapping as often
+        if (isPunctuation(whisper_segment.text)) {
+            segment.end = segment.start;
+        }
+
         try shared.segments.append(segment);
         try shared.text.appendSlice(whisper_segment.text);
 
-        if (last_segment.start + shared.split_threshold_s <= segment.start) {
-            try shared.split_indices.append(segment.char_start);
+        if (shouldSplit(whisper_segment.text)) {
+            try shared.split_indices.append(segment.char_end + 1);
         }
 
+        first_word_pushed = true;
         last_segment = segment;
     }
 }
@@ -289,7 +345,7 @@ const DebugOutput = struct {
     }
 
     fn generateFileName(self: *DebugOutput, alloc: Allocator, start_sample: usize, end_sample: usize, ext: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(alloc, "{s}/{d}_{d}.{s}", .{self.folder.?, start_sample, end_sample, ext});
+        return std.fmt.allocPrint(alloc, "{s}/{d}_{d}.{s}", .{ self.folder.?, start_sample, end_sample, ext });
     }
 
     fn writeWhisperIo(self: *DebugOutput, alloc: Allocator, audio_buf: []const u8, text: []const u8, start_sample: usize, end_sample: usize) !void {
@@ -333,7 +389,7 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_outpu
     c.whisper_log_set(logCallback, null);
 
     const sample_size = sampler.stream.format.sampleSize();
-    const buf_size_s = 8;
+    const buf_size_s = 60;
     const required_context_s = 1;
     const overlap_size_s = 2 * required_context_s;
 
@@ -375,7 +431,7 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_outpu
             defer shared.mutex.unlock();
             try debug_output.writeWhisperIo(alloc, audio_buf, shared.text.items[text_start..shared.text.items.len], start_sample, end_sample);
 
-            @memcpy(audio_buf[0..whisper_sample_rate * overlap_size_s * sample_size], audio_buf[audio_buf.len - whisper_sample_rate * overlap_size_s * sample_size..audio_buf.len]);
+            @memcpy(audio_buf[0 .. whisper_sample_rate * overlap_size_s * sample_size], audio_buf[audio_buf.len - whisper_sample_rate * overlap_size_s * sample_size .. audio_buf.len]);
             buf_pos = whisper_sample_rate * overlap_size_s * sample_size;
         }
     }
@@ -403,11 +459,7 @@ pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field, d
         .shared = shared,
     };
 
-    shared.mutex.lock();
-    const split_threshold = shared.split_threshold_s;
-    shared.mutex.unlock();
-
-    try ret.setSplitThreshold(split_threshold);
+    try ret.calculateSplits();
     return ret;
 }
 
@@ -438,8 +490,7 @@ pub fn serialize(self: *Whisper, writer: save.Writer.FieldWriter) !void {
     try writer.write(data);
 }
 
-// How much time passes between words before we newline
-pub fn setSplitThreshold(self: *Whisper, threshold_s: f32) !void {
+fn calculateSplits(self: *Whisper) !void {
     self.shared.mutex.lock();
     defer self.shared.mutex.unlock();
 
@@ -447,30 +498,14 @@ pub fn setSplitThreshold(self: *Whisper, threshold_s: f32) !void {
     errdefer split_indices.deinit();
 
     const segments = self.shared.segments.items;
-    for (0..segments.len -| 1) |i| {
-        const a = &segments[i];
-        const b = &segments[i + 1];
-
-        if (a.end + threshold_s <= b.start) {
-            try split_indices.append(b.char_start);
+    for (segments) |segment| {
+        if (shouldSplit(self.shared.text.items[segment.char_start..segment.char_end])) {
+            try split_indices.append(segment.char_end + 1);
         }
     }
 
     self.shared.split_indices.deinit();
     self.shared.split_indices = split_indices;
-
-    for (self.shared.segments.items) |segment| {
-        std.debug.print("[{d}-->{d}] {s}\n", .{ segment.start, segment.end, self.shared.text.items[segment.char_start..segment.char_end] });
-    }
-
-    var last_split_idx: usize = 0;
-    for (self.shared.split_indices.items) |split_idx| {
-        std.debug.print("{s}\n", .{self.shared.text.items[last_split_idx..split_idx]});
-        last_split_idx = split_idx;
-    }
-
-    std.debug.print("split indices: {any}\n", .{split_indices});
-    self.shared.split_threshold_s = threshold_s;
 }
 
 fn sharedFromInitData(alloc: Allocator, init_data: ?save.Data.Field) !Shared {
