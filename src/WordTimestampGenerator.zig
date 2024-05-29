@@ -120,6 +120,7 @@ const WhisperRunner = struct {
     ctx: *c.whisper_context,
     params: c.whisper_full_params,
     start_time_ms: i64,
+    required_context_ms: i64,
     const bytes_per_sample = 4;
 
     const SegmentIt = struct {
@@ -130,8 +131,12 @@ const WhisperRunner = struct {
 
         const Output = struct {
             text: []const u8,
-            start_s: f32,
-            end_s: f32,
+            // Relative to the entire file
+            file_start_s: f32,
+            file_end_s: f32,
+            // Relative to this run of whisper
+            buf_start_s: f32,
+            buf_end_s: f32,
         };
 
         fn next(self: *@This()) ?Output {
@@ -142,16 +147,18 @@ const WhisperRunner = struct {
 
             const s = c.whisper_full_get_segment_text(self.ctx, self.i);
             const s_len = std.mem.len(s);
-            const segment_start_cs = c.whisper_full_get_segment_t0(self.ctx, self.i) + self.start_time_cs;
-            const segment_end_cs = c.whisper_full_get_segment_t1(self.ctx, self.i) + self.start_time_cs;
-            var segment_start_s: f32 = @floatFromInt(segment_start_cs);
-            segment_start_s /= 100;
-            var segment_end_s: f32 = @floatFromInt(segment_end_cs);
-            segment_end_s /= 100;
+            const buf_segment_start_cs = c.whisper_full_get_segment_t0(self.ctx, self.i);
+            const buf_segment_end_cs = c.whisper_full_get_segment_t1(self.ctx, self.i);
+            var buf_segment_start_s: f32 = @floatFromInt(buf_segment_start_cs);
+            buf_segment_start_s /= 100;
+            var buf_segment_end_s: f32 = @floatFromInt(buf_segment_end_cs);
+            buf_segment_end_s /= 100;
 
             return .{
-                .start_s = segment_start_s,
-                .end_s = segment_end_s,
+                .buf_start_s = buf_segment_start_s,
+                .buf_end_s = buf_segment_end_s,
+                .file_start_s = buf_segment_start_s + @as(f32, @floatFromInt(self.start_time_cs)) / 100,
+                .file_end_s = buf_segment_end_s + @as(f32, @floatFromInt(self.start_time_cs)) / 100,
                 .text = s[0..s_len],
             };
         }
@@ -162,7 +169,7 @@ const WhisperRunner = struct {
         return val.load(std.builtin.AtomicOrder.unordered);
     }
 
-    fn init(shutdown: *std.atomic.Value(bool)) !WhisperRunner {
+    fn init(shutdown: *std.atomic.Value(bool), required_context_s: f32) !WhisperRunner {
         c.whisper_log_set(logCallback, null);
 
         const cparams = c.whisper_context_default_params();
@@ -182,6 +189,7 @@ const WhisperRunner = struct {
             .start_time_ms = 0,
             .ctx = ctx,
             .params = params,
+            .required_context_ms = @as(i64, @intFromFloat(required_context_s * 1000)),
         };
     }
 
@@ -196,7 +204,7 @@ const WhisperRunner = struct {
         }
 
         const n_segments: usize = @intCast(c.whisper_full_n_segments(self.ctx));
-        defer self.start_time_ms += @intCast(audio_buf.len * 1000 / whisper_sample_rate / bytes_per_sample);
+        defer self.start_time_ms += @as(i64, @intCast(audio_buf.len * 1000 / whisper_sample_rate / bytes_per_sample)) - self.required_context_ms * 2;
         return .{
             .ctx = self.ctx,
             .i = 0,
@@ -206,7 +214,7 @@ const WhisperRunner = struct {
     }
 };
 
-fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared) !void {
+fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared, buf_size_s: f32, required_context_s: f32) !void {
     shared.mutex.lock();
     defer shared.mutex.unlock();
 
@@ -215,8 +223,8 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared) !v
             return;
         };
         const segment = SegmentBounds{
-            .start = whisper_segment.start_s,
-            .end = whisper_segment.end_s,
+            .start = whisper_segment.file_start_s,
+            .end = whisper_segment.file_end_s,
             .char_start = shared.text.items.len,
             .char_end = shared.text.items.len + whisper_segment.text.len,
         };
@@ -229,17 +237,36 @@ fn pushWhisperSegments(segment_it: *WhisperRunner.SegmentIt, shared: *Shared) !v
     var last_segment = shared.segments.items[shared.segments.items.len - 1];
 
     while (segment_it.next()) |whisper_segment| {
-        const segment = SegmentBounds{
-            .start = whisper_segment.start_s,
-            .end = whisper_segment.end_s,
+        var segment = SegmentBounds{
+            .start = whisper_segment.file_start_s,
+            .end = whisper_segment.file_end_s,
             .char_start = shared.text.items.len,
             .char_end = shared.text.items.len + whisper_segment.text.len,
         };
 
+        std.debug.print("[{d} -> {d}] {s}\n", .{whisper_segment.file_start_s, whisper_segment.file_end_s, whisper_segment.text});
+
+        // Project starts at 12.02 (1.02)
+        if (shared.segments.items.len > 0) {
+            const prev_segment = shared.segments.items[shared.segments.items.len - 1];
+            const overlap_s = prev_segment.end - segment.start;
+            const word_len = @min(prev_segment.end - prev_segment.start, segment.end - segment.start);
+            const relative_overlap = overlap_s / word_len;
+            if (relative_overlap > 0.7) {
+                continue;
+            }
+            segment.start = prev_segment.end;
+        }
+
+        // Project starts at 12.0 (7.0)
+        if (whisper_segment.buf_start_s > buf_size_s - required_context_s) {
+            continue;
+        }
+
         try shared.segments.append(segment);
         try shared.text.appendSlice(whisper_segment.text);
 
-        if (last_segment.end + shared.split_threshold_s <= segment.start) {
+        if (last_segment.start + shared.split_threshold_s <= segment.start) {
             try shared.split_indices.append(segment.char_start);
         }
 
@@ -307,12 +334,15 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_outpu
 
     const sample_size = sampler.stream.format.sampleSize();
     const buf_size_s = 8;
+    const required_context_s = 1;
+    const overlap_size_s = 2 * required_context_s;
+
     var audio_buf = try alloc.alloc(u8, whisper_sample_rate * buf_size_s * sample_size);
     defer alloc.free(audio_buf);
 
     var buf_pos: usize = 0;
 
-    var whisper = try WhisperRunner.init(&shared.shutdown);
+    var whisper = try WhisperRunner.init(&shared.shutdown, required_context_s);
     defer whisper.deinit();
     whisper.start_time_ms = @divTrunc(@as(i64, @intCast(shared.num_samples_processed)) * 1000, whisper_sample_rate);
 
@@ -335,8 +365,8 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_outpu
             const text_start = shared.text.items.len;
             shared.mutex.unlock();
 
-            try pushWhisperSegments(&segment_it, shared);
-            shared.num_samples_processed += buf_size_s * whisper_sample_rate;
+            try pushWhisperSegments(&segment_it, shared, buf_size_s, required_context_s);
+            shared.num_samples_processed += (buf_size_s - overlap_size_s) * whisper_sample_rate;
 
             const end_sample = sampler.output_samples;
             const start_sample = end_sample - whisper_sample_rate * buf_size_s;
@@ -345,12 +375,13 @@ fn initThread(alloc: Allocator, path: [:0]const u8, shared: *Shared, debug_outpu
             defer shared.mutex.unlock();
             try debug_output.writeWhisperIo(alloc, audio_buf, shared.text.items[text_start..shared.text.items.len], start_sample, end_sample);
 
-            buf_pos = 0;
+            @memcpy(audio_buf[0..whisper_sample_rate * overlap_size_s * sample_size], audio_buf[audio_buf.len - whisper_sample_rate * overlap_size_s * sample_size..audio_buf.len]);
+            buf_pos = whisper_sample_rate * overlap_size_s * sample_size;
         }
     }
 
     var segment_it = try whisper.next(audio_buf[0..buf_pos]);
-    try pushWhisperSegments(&segment_it, shared);
+    try pushWhisperSegments(&segment_it, shared, buf_size_s, required_context_s);
 }
 
 pub fn init(alloc: Allocator, path: [:0]const u8, init_data: ?save.Data.Field, debug_output: ?[]const u8) !Whisper {
