@@ -8,27 +8,19 @@ Developed live on [twitch](https://twitch.tv/sphaerophoria) and [youtube](https:
 * Cutting stuff down is hard
 * Can we make it easier?
 
-## Expected features
-* Auto generate subtitles for video
-* Attach subtitles to timeline. E.g. clicking on a word will take us to that position
-* Create ranges of video that are either marked as used or unused
-* Preview what the re-rendered video will look/sound like interactively
-* Export the shortened video. Doing as little re-encoding as possible
+## Current state
+* Functional enough
+* Seek by auto-generated subtitles
+* Select sections on timeline with ctrl-click + drag
+* Sections will automatically play back to back
+* Save with ctrl+s and export to final video with run\_ffmpeg\_on\_save.py
 
-```
-      Video playback
-             v
-  --------------------------------------
-  ||               |todo  ||| ~~~      |
-  ||  Code         |~~~~  |||          |
-  ||   goes        |~~    ||| ~~~~~~   |
-  ||    here       |      ||| ~~~~~    | <-- script
-  ||               |me    ||| ~I~~~~~  |
-  ||               |------|||          |
-  ||               |   o  |||          |
-  ||               |  -|- |||          |
-  |------------------------------------|
-  | ---------o-----------------------  | <-- timeline
-  --------------------------------------
+## Screenie
+![](res/sample.png)
 
-```
+## R.I.P.
+This is far enough along that I was able to use it to experiment with my use
+case, cutting down twitch VODs into something shorter. I found that I didn't
+like any of the cuts I was making, so have lost interest on progressing this
+farther. No further development is expected, but feel free to continue on if
+you think it's valuable
